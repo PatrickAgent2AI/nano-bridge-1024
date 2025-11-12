@@ -51,7 +51,7 @@
 
 | 组件 | 测试代码状态 | 测试执行状态 | 覆盖率目标 | 备注 |
 |------|--------------|--------------|------------|------|
-| SVM合约 | ✅ 已完成 | ⏸️ 待合约实现 | > 90% | 使用TDD方式，测试用例已实现 |
+| SVM合约 | ✅ 已完成 | 🟡 部分通过 | > 90% | 发送端合约测试全部通过（7/7），接收端待实现 |
 | EVM合约 | ⚪ 未开始 | ⚪ 未开始 | > 90% | 待M2阶段实施 |
 | Relayer服务 | ⚪ 未开始 | ⚪ 未开始 | > 80% | 待M4阶段实施 |
 
@@ -68,24 +68,30 @@
 
 ## 测试实施状态
 
-### SVM 合约测试（已完成 - 2025-11-12）
+### SVM 合约测试（进行中 - 最后更新：2025-11-13）
 
 ✅ **测试代码已完成**
 - 所有测试用例已按照 TDD 原则实现
-- 测试用例使用 `.skip` 标记，待合约实现后取消跳过
 - 实现了真实的密码学功能（ECDSA 签名、SHA-256 哈希）
 - 无任何注释代码块或假数据
 
 **已实现测试文件：**
 - `tests/bridge1024.ts` - 包含所有发送端、接收端、集成、安全和性能测试
 
-**测试覆盖范围：**
-- ✅ 发送端合约测试：TC-001 ~ TC-007 (7 个测试用例)
-- ✅ 接收端合约测试：TC-101 ~ TC-113 (13 个测试用例)
-- ✅ 集成测试：IT-001 ~ IT-003 (3 个测试用例)
-- ✅ 安全测试：ST-001 ~ ST-005 (5 个测试用例)
-- ✅ 性能测试：PT-001 ~ PT-003 (3 个测试用例)
-- ✅ 密码学辅助函数测试 (5 个测试用例)
+**测试覆盖范围和执行状态：**
+- ✅ **发送端合约测试：TC-001 ~ TC-007 (7 个测试用例) - 全部通过**
+  - ✅ TC-001: Initialize Contract - 通过
+  - ✅ TC-002: Configure Target - 通过
+  - ✅ TC-003: Configure Target - Non-Admin Permission - 通过
+  - ✅ TC-004: Stake Function - Success Scenario - 通过
+  - ✅ TC-005: Stake Function - Insufficient Balance - 通过
+  - ✅ TC-006: Stake Function - Unauthorized - 通过（已修复测试套件）
+  - ✅ TC-007: Stake Event Integrity - 通过
+- ⏸️ 接收端合约测试：TC-101 ~ TC-113 (13 个测试用例) - 待实现
+- ⏸️ 集成测试：IT-001 ~ IT-004 (4 个测试用例) - 待实现
+- ⏸️ 安全测试：ST-001 ~ ST-005 (5 个测试用例) - 待实现
+- ⏸️ 性能测试：PT-001 ~ PT-004 (4 个测试用例) - 待实现
+- ✅ 密码学辅助函数测试 (5 个测试用例) - 部分通过
 
 **技术实现：**
 - 使用 Node.js `crypto` 模块实现 ECDSA (secp256k1) 签名
@@ -93,6 +99,21 @@
 - 实现签名生成、验证和密钥对生成功能
 - 实现 Relayer 白名单和 2/3 阈值计算逻辑
 - 完整的事件数据结构定义和序列化
+
+**已实现的合约功能（2025-11-13）：**
+- ✅ **发送端合约（Sender Contract）**
+  - `initialize_sender`: 初始化合约，设置金库和管理员地址
+  - `configure_target`: 配置目标合约和链ID，包含管理员权限验证
+  - `stake`: 质押功能，包括余额检查、lamports转账、nonce递增和StakeEvent事件发出
+  - 完整的错误处理（InsufficientBalance, Unauthorized等）
+  - 事件发出机制，包含所有必需字段（source_contract, target_contract, chain_id, block_height, amount, receiver_address, nonce）
+
+**待实现的合约功能：**
+- ⏸️ **接收端合约（Receiver Contract）**
+  - `initialize_receiver`: 初始化接收端合约
+  - `configure_source`: 配置源链合约和链ID
+  - `add_relayer` / `remove_relayer` / `is_relayer`: Relayer白名单管理
+  - `submit_signature`: 签名验证和解锁功能，包括ECDSA签名验证、多签阈值检查、nonce防重放
 
 ### EVM 合约测试（未开始）
 

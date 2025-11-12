@@ -4,6 +4,22 @@
 
 本项目是一个基于多签验证的跨链桥系统，支持在 EVM 链（Arbitrum Sepolia）和 SVM 链（1024chain）之间进行 USDC 代币的跨链转移。系统采用质押-解锁机制，通过多个独立的 relayer 进行多签验证，确保跨链转账的安全性。
 
+## 开发状态
+
+**当前阶段：** M3 - SVM 合约开发（进行中）
+
+**最新进展（2025-11-13）：**
+- ✅ SVM 发送端合约实现完成
+  - 初始化功能（initialize_sender）
+  - 配置功能（configure_target）
+  - 质押功能（stake）
+  - 事件发出（StakeEvent）
+- ✅ 发送端合约测试全部通过（TC-001 ~ TC-007，7/7）
+- ⏸️ 接收端合约开发中（TC-101 ~ TC-113）
+- ⏸️ 集成测试、安全测试、性能测试待实现
+
+**详细进度：** 参见 [docs/progress.md](docs/progress.md)
+
 ### 核心特性
 
 - 支持 EVM（Arbitrum Sepolia）与 SVM（1024chain）之间的双向跨链转移

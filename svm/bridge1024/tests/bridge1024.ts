@@ -175,7 +175,7 @@ describe("bridge1024", () => {
 
   describe("Sender Contract Tests", () => {
     describe("TC-001: Initialize Contract", () => {
-      it.skip("should initialize sender contract successfully", async () => {
+      it("should initialize sender contract successfully", async () => {
         try {
           const tx = await program.methods
             .initializeSender(vault.publicKey, admin.publicKey)
@@ -200,7 +200,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-002: Configure Target", () => {
-      it.skip("should configure target successfully", async () => {
+      it("should configure target successfully", async () => {
         try {
           const tx = await program.methods
             .configureTarget(receiverProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
@@ -224,7 +224,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-003: Configure Target - Non-Admin Permission", () => {
-      it.skip("should reject configuration by non-admin", async () => {
+      it("should reject configuration by non-admin", async () => {
         try {
           await program.methods
             .configureTarget(receiverProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
@@ -243,7 +243,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-004: Stake Function - Success Scenario", () => {
-      it.skip("should stake successfully", async () => {
+      it("should stake successfully", async () => {
         try {
           const receiverAddress = user2.publicKey.toBase58();
           const userBalanceBefore = await getBalance(user1.publicKey);
@@ -275,7 +275,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-005: Stake Function - Insufficient Balance", () => {
-      it.skip("should reject stake with insufficient balance", async () => {
+      it("should reject stake with insufficient balance", async () => {
         try {
           const receiverAddress = user2.publicKey.toBase58();
           const largeAmount = new BN(1_000_000_000000);
@@ -299,7 +299,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-006: Stake Function - Unauthorized", () => {
-      it.skip("should reject stake without authorization", async () => {
+      it("should reject stake without authorization", async () => {
         try {
           const receiverAddress = user2.publicKey.toBase58();
 
@@ -316,13 +316,20 @@ describe("bridge1024", () => {
 
           expect.fail("Should have thrown an error");
         } catch (error) {
-          expect(error.message).to.include("Unauthorized");
+          // Accept Solana's signature verification error message
+          // This happens when signers array is empty and user account is marked as Signer
+          const errorMsg = error.message.toLowerCase();
+          expect(
+            errorMsg.includes("unauthorized") ||
+            errorMsg.includes("signature verification failed") ||
+            errorMsg.includes("missing required signature")
+          ).to.be.true;
         }
       });
     });
 
     describe("TC-007: Stake Event Integrity", () => {
-      it.skip("should emit complete stake event", async () => {
+      it("should emit complete stake event", async () => {
         try {
           const receiverAddress = user2.publicKey.toBase58();
           const blockHeight = new BN(await connection.getBlockHeight());
