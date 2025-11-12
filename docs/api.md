@@ -1,5 +1,67 @@
 # API 文档
 
+## 目录
+
+- [API 概览](#api-概览)
+- [智能合约 API](#智能合约-api)
+  - [发送端合约 API](#发送端合约-api)
+  - [接收端合约 API](#接收端合约-api)
+- [Relayer 服务 API](#relayer-服务-api)
+- [模块间调用规约](#模块间调用规约)
+- [数据结构](#数据结构)
+- [配置参数](#配置参数)
+
+---
+
+## API 概览
+
+### 智能合约 API 总览表
+
+| 模块 | 类别 | 接口名称 | 权限 | 主要参数 | 返回值/输出 | 功能效果 |
+|------|------|----------|------|----------|-------------|----------|
+| 发送端合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`, `adminAddress` | 无 | 初始化合约，设置金库和管理员地址 |
+| 发送端合约 | 配置 | `configureTarget` | `onlyAdmin` | `targetContract`, `sourceChainId`, `targetChainId` | 无 | 配置对端接收端合约和链ID |
+| 发送端合约 | 质押 | `stake` | 公开 | `amount`, `receiverAddress` | `nonce` | 质押USDC，触发`StakeEvent`事件 |
+| 接收端合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`, `adminAddress` | 无 | 初始化合约，设置金库和管理员地址 |
+| 接收端合约 | 配置 | `configureSource` | `onlyAdmin` | `sourceContract`, `sourceChainId`, `targetChainId` | 无 | 配置对端发送端合约和链ID |
+| 接收端合约 | 白名单管理 | `addRelayer` | `onlyAdmin` | `relayerAddress` | 无 | 添加Relayer到白名单 |
+| 接收端合约 | 白名单管理 | `removeRelayer` | `onlyAdmin` | `relayerAddress` | 无 | 从白名单移除Relayer |
+| 接收端合约 | 白名单查询 | `isRelayer` | 公开（view） | `relayerAddress` | `bool` | 查询地址是否为Relayer |
+| 接收端合约 | 白名单查询 | `getRelayerCount` | 公开（view） | 无 | `uint256` | 查询当前Relayer数量 |
+| 接收端合约 | 签名验证 | `submitSignature` | `onlyWhitelistedRelayer` | `eventData`, `signature` | 无 | 提交签名，达到阈值后解锁代币 |
+
+### Relayer 服务 API 总览表
+
+| 模块 | 类别 | 功能名称 | 权限 | 主要参数 | 输出 | 功能效果 |
+|------|------|----------|------|----------|------|----------|
+| Relayer服务 | 事件监听 | 监听`StakeEvent` | 无 | 无 | 事件数据 | 监听发送端链的质押事件 |
+| Relayer服务 | 签名转发 | `processEvent` | 内部 | `eventData` | 交易哈希 | 验证事件、生成签名并提交到接收端合约 |
+
+### 事件总览表
+
+| 模块 | 事件名称 | 触发条件 | 事件参数 | 用途 |
+|------|----------|----------|----------|------|
+| 发送端合约 | `StakeEvent` | 用户调用`stake` | `sourceContract`, `targetContract`, `chainId`, `blockHeight`, `amount`, `receiverAddress`, `nonce` | 通知Relayer处理跨链转账 |
+
+### 数据结构总览表
+
+| 数据结构 | 用途 | 字段 | 说明 |
+|----------|------|------|------|
+| `StakeEventData` | 质押事件数据 | `sourceContract`, `targetContract`, `chainId`, `blockHeight`, `amount`, `receiverAddress`, `nonce` | 跨链转账的完整事件数据 |
+
+### 配置参数总览表
+
+| 配置项 | 测试网 | 主网 | 说明 |
+|--------|--------|------|------|
+| Arbitrum RPC | `https://sepolia-rollup.arbitrum.io/rpc` | `https://arb1.arbitrum.io/rpc` | Arbitrum网络RPC端点 |
+| 1024chain RPC | `https://testnet-rpc.1024chain.com/rpc/` | 待配置 | 1024chain网络RPC端点 |
+| Arbitrum Chain ID | 421614 | 42161 | 链标识符 |
+| 1024chain Chain ID | 91024 | 待确认 | 链标识符 |
+| Relayer数量 | ≥ 3 | ≥ 3 | 中继节点数量 |
+| 签名阈值 | > 2/3 * relayer总数 | > 2/3 * relayer总数 | 解锁所需签名比例 |
+
+---
+
 ## 智能合约 API
 
 ### 发送端合约 API
@@ -10,12 +72,14 @@
 function initialize(
     address vaultAddress,      // 质押金库地址
     address adminAddress       // 管理员钱包地址
-)
+) onlyAdmin
 ```
 
 **参数说明：**
 - `vaultAddress`：存储质押代币的金库地址
 - `adminAddress`：具有管理权限的钱包地址
+
+**权限：** 仅管理员可调用
 
 #### 对端配置
 
@@ -88,12 +152,14 @@ event StakeEvent(
 function initialize(
     address vaultAddress,      // 质押金库地址
     address adminAddress       // 管理员钱包地址
-)
+) onlyAdmin
 ```
 
 **参数说明：**
 - `vaultAddress`：存储待解锁代币的金库地址（需要合约有转账权限）
 - `adminAddress`：具有管理权限的钱包地址
+
+**权限：** 仅管理员可调用
 
 #### 对端配置
 
