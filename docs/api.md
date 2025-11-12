@@ -193,10 +193,19 @@ function processEvent(eventData: StakeEventData)
 
 **处理流程：**
 1. 接收到 `StakeEvent` 事件数据
-2. 对事件数据进行 hash 计算
-3. 使用 relayer 的私钥对 hash 进行签名
-4. 调用接收端合约的 `submitSignature` 接口
-5. 传入事件数据和签名
+2. **验证消息正确性：**
+   - 验证来自正确的发送端合约地址
+   - 验证 chain id 正确
+   - 验证 nonce 未被使用
+3. 对事件数据进行 hash 计算
+4. 使用 relayer 的私钥对 hash 进行签名
+5. 调用接收端合约的 `submitSignature` 接口
+6. 传入事件数据和签名
+
+**验证规则：**
+- `sourceContract`：必须匹配配置中的发送端合约地址
+- `chainId`：必须匹配配置中的发送端链 ID
+- `nonce`：检查本地缓存，确保未处理过该 nonce（可选，接收端合约也会验证）
 
 ---
 
