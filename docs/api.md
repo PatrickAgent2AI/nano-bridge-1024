@@ -340,6 +340,49 @@ Relayer 调用: submitSignature(eventData, signature)
 
 ## 数据结构
 
+### Solana 账户设计
+
+#### ReceiverState 主账户
+
+存储固定大小的配置数据，支持最多 21 个 relayer 和最近 1000 个已使用的 nonce：
+
+```rust
+pub struct ReceiverState {
+    pub vault: Pubkey,              // 32 bytes
+    pub admin: Pubkey,              // 32 bytes
+    pub relayer_count: u64,         // 8 bytes
+    pub source_contract: Pubkey,    // 32 bytes
+    pub source_chain_id: u64,       // 8 bytes
+    pub target_chain_id: u64,       // 8 bytes
+    pub relayers: Vec<Pubkey>,      // 4 + 32 * 21 = 676 bytes
+    pub used_nonces: Vec<u64>,      // 4 + 8 * 1000 = 8004 bytes
+}
+```
+
+**账户大小：** ~8800 bytes（在 10KB 限制内）
+
+#### NonceSignature PDA 账户
+
+为每个 nonce 创建独立的 PDA 账户存储签名记录，支持无限 nonce：
+
+```rust
+pub struct NonceSignature {
+    pub nonce: u64,                    // 8 bytes
+    pub signed_relayers: Vec<Pubkey>,   // 4 + 32 * 21 = 676 bytes
+    pub signature_count: u8,            // 1 byte
+    pub is_unlocked: bool,              // 1 byte
+}
+```
+
+**PDA 种子：** `[b"nonce_signature", nonce.to_le_bytes()]`  
+**账户大小：** ~690 bytes（固定大小）
+
+**设计优势：**
+- 支持理论上无限次请求（每个 nonce 独立账户）
+- 支持最多 21 个 relayer
+- 固定大小，易于管理
+- 解锁后可以关闭账户回收租金
+
 ### 质押事件 Hash 计算
 
 ```
@@ -394,6 +437,12 @@ require(isRelayer(recoveredAddress), "Invalid signature")
 
 ### Relayer 配置
 
-- Relayer 数量：≥ 3
-- 签名阈值：> 2/3 * relayer 总数
+- Relayer 数量：≥ 3，最多 21 个
+- 签名阈值：`Math.ceil(relayer_count * 2 / 3)`
 - Relayer 私钥列表：每个 relayer 独立保管
+
+**阈值示例：**
+- 3 个 Relayer → 阈值 2
+- 4 个 Relayer → 阈值 3
+- 5 个 Relayer → 阈值 4
+- 21 个 Relayer → 阈值 15

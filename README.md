@@ -8,15 +8,21 @@
 
 **当前阶段：** M3 - SVM 合约开发（进行中）
 
-**最新进展（2025-11-13）：**
+**最新进展（2025-11-14）：**
 - ✅ SVM 发送端合约实现完成
   - 初始化功能（initialize_sender）
   - 配置功能（configure_target）
   - 质押功能（stake）
   - 事件发出（StakeEvent）
 - ✅ 发送端合约测试全部通过（TC-001 ~ TC-007，7/7）
-- ⏸️ 接收端合约开发中（TC-101 ~ TC-113）
+- ✅ 接收端合约基础功能完成（TC-101 ~ TC-106，6/6通过）
+  - 初始化功能（initialize_receiver）
+  - 配置功能（configure_source）
+  - Relayer白名单管理（add_relayer, remove_relayer, is_relayer）
+  - 签名提交和阈值检查（submit_signature）
+- 🟡 接收端合约签名提交功能测试进行中（TC-107 ~ TC-108）
 - ⏸️ 集成测试、安全测试、性能测试待实现
+- 📝 **设计优化：支持无限请求和最多21个relayer，使用PDA账户存储签名记录**
 
 **详细进度：** 参见 [docs/progress.md](docs/progress.md)
 
