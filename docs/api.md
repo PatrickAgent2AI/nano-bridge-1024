@@ -9,17 +9,30 @@
 ```
 function initialize(
     address vaultAddress,      // 质押金库地址
-    address adminAddress,      // 管理员钱包地址
-    uint256 sourceChainId,     // 自己的 chain id
-    uint256 targetChainId      // 对端的 chain id
+    address adminAddress       // 管理员钱包地址
 )
 ```
 
 **参数说明：**
 - `vaultAddress`：存储质押代币的金库地址
 - `adminAddress`：具有管理权限的钱包地址
+
+#### 对端配置
+
+```
+function configureTarget(
+    address targetContract,    // 对端接收端合约地址
+    uint256 sourceChainId,     // 自己的 chain id
+    uint256 targetChainId      // 对端的 chain id
+) onlyAdmin
+```
+
+**参数说明：**
+- `targetContract`：对端接收端合约地址
 - `sourceChainId`：当前链的 chain id
 - `targetChainId`：目标链的 chain id
+
+**权限：** 仅管理员可调用
 
 #### 质押接口
 
@@ -74,17 +87,30 @@ event StakeEvent(
 ```
 function initialize(
     address vaultAddress,      // 质押金库地址
-    address adminAddress,      // 管理员钱包地址
-    uint256 sourceChainId,     // 对端的 chain id
-    uint256 targetChainId      // 自己的 chain id
+    address adminAddress       // 管理员钱包地址
 )
 ```
 
 **参数说明：**
 - `vaultAddress`：存储待解锁代币的金库地址（需要合约有转账权限）
 - `adminAddress`：具有管理权限的钱包地址
+
+#### 对端配置
+
+```
+function configureSource(
+    address sourceContract,    // 对端发送端合约地址
+    uint256 sourceChainId,     // 对端的 chain id
+    uint256 targetChainId      // 自己的 chain id
+) onlyAdmin
+```
+
+**参数说明：**
+- `sourceContract`：对端发送端合约地址
 - `sourceChainId`：源链的 chain id
 - `targetChainId`：当前链的 chain id
+
+**权限：** 仅管理员可调用
 
 #### Relayer 白名单管理
 
@@ -160,12 +186,14 @@ struct StakeEventData {
 
 **功能描述：**
 1. 验证调用者在 relayer 白名单中
-2. 验证签名的合法性
-3. 检查 nonce 是否已被使用
-4. 记录该 relayer 的签名
-5. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
-6. 解锁操作：从金库向接收地址转账等量 USDC
-7. 标记 nonce 为已使用，防止重放
+2. **验证源链合约地址正确**（与配置的 sourceContract 匹配）
+3. **验证 chain id 正确**（与配置的 sourceChainId 匹配）
+4. 验证签名的合法性
+5. 检查 nonce 是否已被使用
+6. 记录该 relayer 的签名
+7. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
+8. 解锁操作：从金库向接收地址转账等量 USDC
+9. 标记 nonce 为已使用，防止重放
 
 ---
 
