@@ -50,11 +50,24 @@ describe("bridge1024", () => {
   }
 
   function generateECDSAKeypair(): { privateKey: Buffer; publicKey: Buffer } {
-    const ecdh = crypto.createECDH("secp256k1");
-    ecdh.generateKeys();
+    // Use crypto.generateKeyPairSync for proper secp256k1 key generation
+    // Generate keys in PEM format for compatibility with createSign/createVerify
+    const { privateKey: privateKeyPEM, publicKey: publicKeyPEM } = crypto.generateKeyPairSync("ec", {
+      namedCurve: "secp256k1",
+      publicKeyEncoding: {
+        type: "spki",
+        format: "pem",
+      },
+      privateKeyEncoding: {
+        type: "pkcs8",
+        format: "pem",
+      },
+    });
+    
+    // Convert PEM strings to Buffers
     return {
-      privateKey: ecdh.getPrivateKey(),
-      publicKey: ecdh.getPublicKey(),
+      privateKey: Buffer.from(privateKeyPEM),
+      publicKey: Buffer.from(publicKeyPEM),
     };
   }
 
@@ -85,16 +98,20 @@ describe("bridge1024", () => {
 
   function generateSignature(eventData: StakeEventData, privateKey: Buffer): Buffer {
     const hash = hashEventData(eventData);
+    // Create signer with the private key in PEM format
     const sign = crypto.createSign("SHA256");
     sign.update(hash);
-    return sign.sign(privateKey);
+    // The privateKey is in PEM format (as string in Buffer)
+    // sign.sign() returns a Buffer by default
+    return sign.sign(privateKey.toString());
   }
 
   function verifySignature(eventData: StakeEventData, signature: Buffer, publicKey: Buffer): boolean {
     const hash = hashEventData(eventData);
     const verify = crypto.createVerify("SHA256");
     verify.update(hash);
-    return verify.verify(publicKey, signature);
+    // The publicKey is in PEM format (as string in Buffer)
+    return verify.verify(publicKey.toString(), signature);
   }
 
   function calculateThreshold(relayerCount: number): number {
@@ -366,7 +383,7 @@ describe("bridge1024", () => {
 
   describe("Receiver Contract Tests", () => {
     describe("TC-101: Initialize Contract", () => {
-      it.skip("should initialize receiver contract successfully", async () => {
+      it("should initialize receiver contract successfully", async () => {
         try {
           const tx = await program.methods
             .initializeReceiver(vault.publicKey, admin.publicKey)
@@ -391,7 +408,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-102: Configure Source", () => {
-      it.skip("should configure source successfully", async () => {
+      it("should configure source successfully", async () => {
         try {
           const tx = await program.methods
             .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
@@ -415,7 +432,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-103: Configure Source - Non-Admin Permission", () => {
-      it.skip("should reject configuration by non-admin", async () => {
+      it("should reject configuration by non-admin", async () => {
         try {
           await program.methods
             .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
@@ -434,7 +451,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-104: Add Relayer - Admin Permission", () => {
-      it.skip("should add relayer successfully", async () => {
+      it("should add relayer successfully", async () => {
         try {
           const tx1 = await program.methods
             .addRelayer(relayer1.publicKey)
@@ -487,7 +504,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-105: Add Relayer - Non-Admin Permission", () => {
-      it.skip("should reject adding relayer by non-admin", async () => {
+      it("should reject adding relayer by non-admin", async () => {
         try {
           await program.methods
             .addRelayer(relayer1.publicKey)
@@ -506,7 +523,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-106: Remove Relayer - Admin Permission", () => {
-      it.skip("should remove relayer successfully", async () => {
+      it("should remove relayer successfully", async () => {
         try {
           const stateBefore = await program.account.receiverState.fetch(receiverProgramState);
           const relayerCountBefore = stateBefore.relayerCount.toNumber();
@@ -540,8 +557,92 @@ describe("bridge1024", () => {
     });
 
     describe("TC-107: Submit Signature - Single Relayer", () => {
-      it.skip("should submit signature successfully without unlocking", async () => {
+      it("should submit signature successfully without unlocking", async () => {
         try {
+          // Initialize receiver contract if not already initialized
+          try {
+            await program.account.receiverState.fetch(receiverProgramState);
+          } catch {
+            const initTx = await program.methods
+              .initializeReceiver(vault.publicKey, admin.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(initTx);
+          }
+
+          // Configure source if not already configured
+          try {
+            const state = await program.account.receiverState.fetch(receiverProgramState);
+            if (state.sourceContract.toBase58() !== senderProgram.toBase58()) {
+              const configTx = await program.methods
+                .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
+                .accounts({
+                  receiverState: receiverProgramState,
+                  admin: admin.publicKey,
+                })
+                .signers([admin])
+                .rpc();
+              await connection.confirmTransaction(configTx);
+            }
+          } catch {
+            const configTx = await program.methods
+              .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(configTx);
+          }
+
+          // Add relayers if not already added
+          const stateForRelayers = await program.account.receiverState.fetch(receiverProgramState);
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer1.publicKey.toBase58())) {
+            const addTx1 = await program.methods
+              .addRelayer(relayer1.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx1);
+          }
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer2.publicKey.toBase58())) {
+            const addTx2 = await program.methods
+              .addRelayer(relayer2.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx2);
+          }
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer3.publicKey.toBase58())) {
+            const addTx3 = await program.methods
+              .addRelayer(relayer3.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx3);
+          }
+
+          // Ensure vault has balance for potential unlock
+          const vaultBalance = await getBalance(vault.publicKey);
+          if (vaultBalance < TEST_AMOUNT.toNumber()) {
+            await airdrop(vault.publicKey, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
+          }
+
           const eventData: StakeEventData = {
             sourceContract: senderProgram,
             targetContract: receiverProgram,
@@ -551,6 +652,10 @@ describe("bridge1024", () => {
             receiverAddress: user2.publicKey.toBase58(),
             nonce: new BN(1),
           };
+
+          // Verify relayer_count is correct before submitting signature
+          const stateBeforeSubmit = await program.account.receiverState.fetch(receiverProgramState);
+          expect(stateBeforeSubmit.relayerCount.toNumber()).to.equal(3);
 
           const signature = generateSignature(eventData, relayer1ECDSA.ecdsaPrivateKey);
           const isValid = verifySignature(eventData, signature, relayer1ECDSA.ecdsaPublicKey);
@@ -565,7 +670,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -588,8 +693,92 @@ describe("bridge1024", () => {
     });
 
     describe("TC-108: Submit Signature - Threshold Reached", () => {
-      it.skip("should unlock when threshold is reached", async () => {
+      it("should unlock when threshold is reached", async () => {
         try {
+          // Initialize receiver contract if not already initialized
+          try {
+            await program.account.receiverState.fetch(receiverProgramState);
+          } catch {
+            const initTx = await program.methods
+              .initializeReceiver(vault.publicKey, admin.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(initTx);
+          }
+
+          // Configure source if not already configured
+          try {
+            const state = await program.account.receiverState.fetch(receiverProgramState);
+            if (state.sourceContract.toBase58() !== senderProgram.toBase58()) {
+              const configTx = await program.methods
+                .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
+                .accounts({
+                  receiverState: receiverProgramState,
+                  admin: admin.publicKey,
+                })
+                .signers([admin])
+                .rpc();
+              await connection.confirmTransaction(configTx);
+            }
+          } catch {
+            const configTx = await program.methods
+              .configureSource(senderProgram, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(configTx);
+          }
+
+          // Add relayers if not already added
+          const stateForRelayers = await program.account.receiverState.fetch(receiverProgramState);
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer1.publicKey.toBase58())) {
+            const addTx1 = await program.methods
+              .addRelayer(relayer1.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx1);
+          }
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer2.publicKey.toBase58())) {
+            const addTx2 = await program.methods
+              .addRelayer(relayer2.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx2);
+          }
+          if (!stateForRelayers.relayers.some((r: any) => r.toBase58() === relayer3.publicKey.toBase58())) {
+            const addTx3 = await program.methods
+              .addRelayer(relayer3.publicKey)
+              .accounts({
+                receiverState: receiverProgramState,
+                admin: admin.publicKey,
+              })
+              .signers([admin])
+              .rpc();
+            await connection.confirmTransaction(addTx3);
+          }
+
+          // Ensure vault has balance for unlock
+          const vaultBalance = await getBalance(vault.publicKey);
+          if (vaultBalance < TEST_AMOUNT.toNumber()) {
+            await airdrop(vault.publicKey, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
+          }
+
           const eventData: StakeEventData = {
             sourceContract: senderProgram,
             targetContract: receiverProgram,
@@ -612,7 +801,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -637,7 +826,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -688,7 +877,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -776,7 +965,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -820,7 +1009,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -864,7 +1053,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -927,7 +1116,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -950,7 +1139,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1017,7 +1206,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1040,7 +1229,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1145,7 +1334,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1168,7 +1357,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1218,7 +1407,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1241,7 +1430,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1264,7 +1453,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1406,7 +1595,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1429,7 +1618,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1473,7 +1662,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1515,7 +1704,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1590,7 +1779,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature)
+              signature
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1655,7 +1844,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature1)
+              signature1
             )
             .accounts({
               receiverState: receiverProgramState,
@@ -1678,7 +1867,7 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(signature2)
+              signature2
             )
             .accounts({
               receiverState: receiverProgramState,

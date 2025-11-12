@@ -100,6 +100,7 @@ pub mod bridge1024 {
         receiver_state.admin = admin;
         receiver_state.relayer_count = 0;
         receiver_state.used_nonces = Vec::new();
+        receiver_state.signature_records = Vec::new();
         Ok(())
     }
 
@@ -161,13 +162,13 @@ pub mod bridge1024 {
     pub fn submit_signature(
         ctx: Context<SubmitSignature>,
         source_contract: Pubkey,
-        target_contract: Pubkey,
+        _target_contract: Pubkey,
         chain_id: u64,
-        block_height: u64,
+        _block_height: u64,
         amount: u64,
-        receiver_address: String,
+        _receiver_address: String,
         nonce: u64,
-        signature: Vec<u8>,
+        _signature: Vec<u8>,
     ) -> Result<()> {
         let receiver_state = &mut ctx.accounts.receiver_state;
         let relayer = &ctx.accounts.relayer;
@@ -192,11 +193,16 @@ pub mod bridge1024 {
             BridgeError::InvalidChainId
         );
 
-        // Check if nonce is already used
+        // Check if nonce is already used (unlocked)
         require!(
             !receiver_state.used_nonces.contains(&nonce),
             BridgeError::NonceAlreadyUsed
         );
+
+        // Check if this relayer has already signed for this nonce
+        let already_signed = receiver_state.signature_records.iter()
+            .any(|record| record.nonce == nonce && record.relayer == relayer.key());
+        require!(!already_signed, BridgeError::DuplicateSignature);
 
         // TODO: Verify ECDSA signature
         // For now, we'll skip signature verification and implement it later
@@ -204,32 +210,46 @@ pub mod bridge1024 {
         // by a relayer's ECDSA private key for the event data hash
 
         // Record this relayer's signature for this nonce
-        // We need to track which relayers have signed for each nonce
-        // For simplicity, we'll just check if we have enough signatures when threshold is reached
+        receiver_state.signature_records.push(SignatureRecord {
+            nonce,
+            relayer: relayer.key(),
+        });
 
-        // Calculate threshold (> 2/3 of relayer count)
-        let threshold = (receiver_state.relayer_count * 2 / 3) + 1;
-        
-        // For now, we'll implement a simple version where we count signatures
-        // In a real implementation, we'd need to track signatures per nonce
-        // This is a simplified version - we'll need to enhance this later
+        // Count unique relayers who have signed for this nonce
+        let mut signed_relayers = std::collections::HashSet::new();
+        for record in receiver_state.signature_records.iter() {
+            if record.nonce == nonce {
+                signed_relayers.insert(record.relayer);
+            }
+        }
+        let signature_count = signed_relayers.len() as u64;
 
-        // Check if we should unlock (simplified - in real implementation, track signatures per nonce)
-        // For now, we'll just mark nonce as used and unlock if this is the threshold signature
-        // This is a simplified implementation - proper implementation would track all signatures
-
-        // Mark nonce as used
-        receiver_state.used_nonces.push(nonce);
-
-        // Transfer lamports from vault to receiver
-        let vault_balance = vault.lamports();
+        // Calculate threshold: Math.ceil(relayer_count * 2 / 3)
+        // In Rust: (relayer_count * 2 + 2) / 3
+        // Require at least 1 relayer to have a valid threshold
         require!(
-            vault_balance >= amount,
-            BridgeError::InsufficientBalance
+            receiver_state.relayer_count > 0,
+            BridgeError::NotWhitelisted
         );
+        
+        let threshold = (receiver_state.relayer_count * 2 + 2) / 3;
 
-        **vault.to_account_info().try_borrow_mut_lamports()? -= amount;
-        **receiver.to_account_info().try_borrow_mut_lamports()? += amount;
+        // If threshold is reached, unlock and mark nonce as used
+        if signature_count >= threshold {
+            // Check vault balance
+            let vault_balance = vault.lamports();
+            require!(
+                vault_balance >= amount,
+                BridgeError::InsufficientBalance
+            );
+
+            // Transfer lamports from vault to receiver
+            **vault.to_account_info().try_borrow_mut_lamports()? -= amount;
+            **receiver.to_account_info().try_borrow_mut_lamports()? += amount;
+
+            // Mark nonce as used to prevent replay
+            receiver_state.used_nonces.push(nonce);
+        }
 
         Ok(())
     }
@@ -346,13 +366,22 @@ pub struct ReceiverState {
     pub target_chain_id: u64,
     pub relayers: Vec<Pubkey>,
     pub used_nonces: Vec<u64>,
+    // Track signatures per nonce: Vec<(nonce, relayer_pubkey)>
+    pub signature_records: Vec<SignatureRecord>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct SignatureRecord {
+    pub nonce: u64,
+    pub relayer: Pubkey,
 }
 
 impl ReceiverState {
     // Base: vault(32) + admin(32) + relayer_count(8) + source_contract(32) + source_chain_id(8) + target_chain_id(8)
-    // Vec overhead: relayers(4 + 32*max_relayers) + used_nonces(4 + 8*max_nonces)
-    // Using reasonable max sizes: 10 relayers, 100 nonces
-    pub const LEN: usize = 32 + 32 + 8 + 32 + 8 + 8 + 4 + (32 * 10) + 4 + (8 * 100);
+    // Vec overhead: relayers(4 + 32*max_relayers) + used_nonces(4 + 8*max_nonces) + signature_records(4 + (8+32)*max_records)
+    // Using reasonable max sizes: 10 relayers, 100 nonces, 50 signature records
+    // Total: 120 + 324 + 804 + 2004 = 3252 bytes (well under 10240 limit)
+    pub const LEN: usize = 32 + 32 + 8 + 32 + 8 + 8 + 4 + (32 * 10) + 4 + (8 * 100) + 4 + ((8 + 32) * 50);
 }
 
 #[event]
@@ -386,4 +415,6 @@ pub enum BridgeError {
     NonceAlreadyUsed,
     #[msg("Invalid signature")]
     InvalidSignature,
+    #[msg("Duplicate signature")]
+    DuplicateSignature,
 }
