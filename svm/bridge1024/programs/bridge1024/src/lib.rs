@@ -109,6 +109,197 @@ pub mod bridge1024 {
 
         Ok(new_nonce)
     }
+
+    pub fn add_relayer(
+        ctx: Context<ManageRelayer>,
+        relayer: Pubkey,
+        ecdsa_pubkey: [u8; 65],
+    ) -> Result<()> {
+        let receiver_state = &mut ctx.accounts.receiver_state;
+
+        // Check if relayer already exists
+        require!(
+            !receiver_state.relayers.contains(&relayer),
+            ErrorCode::RelayerAlreadyExists
+        );
+
+        // Check max relayers limit
+        require!(
+            receiver_state.relayers.len() < ReceiverState::MAX_RELAYERS,
+            ErrorCode::TooManyRelayers
+        );
+
+        // Add relayer and ECDSA public key
+        receiver_state.relayers.push(relayer);
+        receiver_state.relayer_ecdsa_pubkeys.push(ecdsa_pubkey);
+        receiver_state.relayer_count += 1;
+
+        Ok(())
+    }
+
+    pub fn remove_relayer(ctx: Context<ManageRelayer>, relayer: Pubkey) -> Result<()> {
+        let receiver_state = &mut ctx.accounts.receiver_state;
+
+        // Find relayer index
+        let index = receiver_state
+            .relayers
+            .iter()
+            .position(|&r| r == relayer)
+            .ok_or(ErrorCode::RelayerNotFound)?;
+
+        // Remove relayer and corresponding ECDSA public key
+        receiver_state.relayers.remove(index);
+        receiver_state.relayer_ecdsa_pubkeys.remove(index);
+        receiver_state.relayer_count -= 1;
+
+        Ok(())
+    }
+
+    pub fn submit_signature(
+        ctx: Context<SubmitSignature>,
+        _nonce: u64,
+        event_data: StakeEventData,
+        signature: Vec<u8>,
+    ) -> Result<()> {
+        let receiver_state = &ctx.accounts.receiver_state;
+        let cross_chain_request = &mut ctx.accounts.cross_chain_request;
+
+        // Verify USDC address is configured
+        require!(
+            receiver_state.usdc_mint != Pubkey::default(),
+            ErrorCode::UsdcNotConfigured
+        );
+
+        // Verify source contract address
+        require!(
+            event_data.source_contract == receiver_state.source_contract,
+            ErrorCode::InvalidSourceContract
+        );
+
+        // Verify chain ID
+        require!(
+            event_data.source_chain_id == receiver_state.source_chain_id,
+            ErrorCode::InvalidChainId
+        );
+
+        // Verify nonce is incrementing
+        require!(
+            event_data.nonce > receiver_state.last_nonce,
+            ErrorCode::InvalidNonce
+        );
+
+        // Verify relayer is whitelisted
+        let relayer_index = receiver_state
+            .relayers
+            .iter()
+            .position(|&r| r == ctx.accounts.relayer.key())
+            .ok_or(ErrorCode::Unauthorized)?;
+
+        // Initialize cross-chain request if this is the first signature
+        if cross_chain_request.signature_count == 0 {
+            cross_chain_request.nonce = event_data.nonce;
+            cross_chain_request.signed_relayers = Vec::new();
+            cross_chain_request.signature_count = 0;
+            cross_chain_request.is_unlocked = false;
+            cross_chain_request.event_data = event_data.clone();
+        }
+
+        // Check if this relayer has already signed
+        require!(
+            !cross_chain_request.signed_relayers.contains(&ctx.accounts.relayer.key()),
+            ErrorCode::RelayerAlreadySigned
+        );
+
+        // Verify ECDSA signature
+        let ecdsa_pubkey = &receiver_state.relayer_ecdsa_pubkeys[relayer_index];
+        verify_ecdsa_signature(&event_data, &signature, ecdsa_pubkey)?;
+
+        // Record signature
+        cross_chain_request.signed_relayers.push(ctx.accounts.relayer.key());
+        cross_chain_request.signature_count += 1;
+
+        // Calculate threshold: ceil(relayer_count * 2 / 3)
+        let threshold = ((receiver_state.relayer_count * 2 + 2) / 3) as u8;
+
+        // Check if threshold is reached
+        if cross_chain_request.signature_count >= threshold && !cross_chain_request.is_unlocked {
+            // Mark as unlocked
+            cross_chain_request.is_unlocked = true;
+
+            // Update last_nonce
+            let receiver_state = &mut ctx.accounts.receiver_state;
+            receiver_state.last_nonce = event_data.nonce;
+
+            // Unlock tokens: transfer from vault to receiver
+            // Find vault bump
+            let (vault_pda, vault_bump) = Pubkey::find_program_address(&[b"vault"], ctx.program_id);
+            require!(vault_pda == ctx.accounts.vault.key(), ErrorCode::Unauthorized);
+            
+            let vault_seeds = &[b"vault".as_ref(), &[vault_bump]];
+            let signer_seeds = &[&vault_seeds[..]];
+
+            let cpi_accounts = Transfer {
+                from: ctx.accounts.vault_token_account.to_account_info(),
+                to: ctx.accounts.receiver_token_account.to_account_info(),
+                authority: ctx.accounts.vault.to_account_info(),
+            };
+            let cpi_program = ctx.accounts.token_program.to_account_info();
+            let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+            token::transfer(cpi_ctx, event_data.amount)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn add_liquidity(ctx: Context<ManageLiquidity>, amount: u64) -> Result<()> {
+        // Transfer from admin token account to vault token account
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.admin_token_account.to_account_info(),
+            to: ctx.accounts.vault_token_account.to_account_info(),
+            authority: ctx.accounts.admin.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::transfer(cpi_ctx, amount)?;
+
+        Ok(())
+    }
+
+    pub fn withdraw_liquidity(ctx: Context<ManageLiquidity>, amount: u64) -> Result<()> {
+        // Transfer from vault token account to admin token account using vault PDA authority
+        // Find vault bump
+        let (vault_pda, vault_bump) = Pubkey::find_program_address(&[b"vault"], ctx.program_id);
+        require!(vault_pda == ctx.accounts.vault.key(), ErrorCode::Unauthorized);
+        
+        let vault_seeds = &[b"vault".as_ref(), &[vault_bump]];
+        let signer_seeds = &[&vault_seeds[..]];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.admin_token_account.to_account_info(),
+            authority: ctx.accounts.vault.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
+        token::transfer(cpi_ctx, amount)?;
+
+        Ok(())
+    }
+}
+
+fn verify_ecdsa_signature(
+    _event_data: &StakeEventData,
+    signature: &[u8],
+    _ecdsa_pubkey: &[u8; 65],
+) -> Result<()> {
+    // For now, just verify signature format (length check)
+    // Full ECDSA verification using secp256k1_program will be implemented later
+    require!(
+        signature.len() >= 64 && signature.len() <= 73,
+        ErrorCode::InvalidSignature
+    );
+
+    Ok(())
 }
 
 #[derive(Accounts)]
@@ -219,6 +410,106 @@ pub struct Stake<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct ManageRelayer<'info> {
+    #[account(
+        mut,
+        seeds = [b"receiver_state"],
+        bump,
+        has_one = admin @ ErrorCode::Unauthorized
+    )]
+    pub receiver_state: Account<'info, ReceiverState>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct SubmitSignature<'info> {
+    #[account(
+        mut,
+        seeds = [b"receiver_state"],
+        bump
+    )]
+    pub receiver_state: Account<'info, ReceiverState>,
+
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        space = 8 + CrossChainRequest::LEN,
+        seeds = [b"cross_chain_request", nonce.to_le_bytes().as_ref()],
+        bump
+    )]
+    pub cross_chain_request: Account<'info, CrossChainRequest>,
+
+    #[account(mut)]
+    pub relayer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump
+    )]
+    /// CHECK: This is the vault PDA
+    pub vault: UncheckedAccount<'info>,
+
+    /// CHECK: This is the USDC mint address
+    pub usdc_mint: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = vault_token_account.mint == usdc_mint.key() @ ErrorCode::UsdcNotConfigured,
+        constraint = vault_token_account.owner == vault.key() @ ErrorCode::Unauthorized
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    /// CHECK: This is the receiver token account
+    pub receiver_token_account: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ManageLiquidity<'info> {
+    #[account(
+        seeds = [b"receiver_state"],
+        bump,
+        has_one = admin @ ErrorCode::Unauthorized
+    )]
+    pub receiver_state: Account<'info, ReceiverState>,
+
+    pub admin: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump
+    )]
+    /// CHECK: This is the vault PDA
+    pub vault: UncheckedAccount<'info>,
+
+    /// CHECK: This is the USDC mint address
+    pub usdc_mint: UncheckedAccount<'info>,
+
+    #[account(
+        mut,
+        constraint = admin_token_account.mint == usdc_mint.key() @ ErrorCode::UsdcNotConfigured,
+        constraint = admin_token_account.owner == admin.key() @ ErrorCode::Unauthorized
+    )]
+    pub admin_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = vault_token_account.mint == usdc_mint.key() @ ErrorCode::UsdcNotConfigured,
+        constraint = vault_token_account.owner == vault.key() @ ErrorCode::Unauthorized
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 pub struct SenderState {
     pub vault: Pubkey,
@@ -256,6 +547,47 @@ impl ReceiverState {
         + 4 + (65 * Self::MAX_RELAYERS); // relayer_ecdsa_pubkeys Vec
 }
 
+#[account]
+pub struct CrossChainRequest {
+    pub nonce: u64,
+    pub signed_relayers: Vec<Pubkey>,
+    pub signature_count: u8,
+    pub is_unlocked: bool,
+    pub event_data: StakeEventData,
+}
+
+impl CrossChainRequest {
+    pub const MAX_RELAYERS: usize = 18;
+    pub const LEN: usize = 8 + // nonce
+        4 + (32 * Self::MAX_RELAYERS) + // signed_relayers Vec
+        1 + // signature_count
+        1 + // is_unlocked
+        StakeEventData::LEN; // event_data
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct StakeEventData {
+    pub source_contract: Pubkey,
+    pub target_contract: Pubkey,
+    pub source_chain_id: u64,
+    pub target_chain_id: u64,
+    pub block_height: u64,
+    pub amount: u64,
+    pub receiver_address: String,
+    pub nonce: u64,
+}
+
+impl StakeEventData {
+    pub const LEN: usize = 32 + // source_contract
+        32 + // target_contract
+        8 + // source_chain_id
+        8 + // target_chain_id
+        8 + // block_height
+        8 + // amount
+        4 + 64 + // receiver_address (String with max 64 chars)
+        8; // nonce
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Unauthorized")]
@@ -276,6 +608,10 @@ pub enum ErrorCode {
     InvalidSourceContract,
     #[msg("Invalid chain ID")]
     InvalidChainId,
+    #[msg("Too many relayers")]
+    TooManyRelayers,
+    #[msg("Relayer already signed")]
+    RelayerAlreadySigned,
 }
 
 #[event]

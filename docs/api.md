@@ -701,14 +701,14 @@ require(isRelayer(recoveredAddress), "Invalid signature")
 ### Relayer 配置
 
 - Relayer 数量：≥ 3，最多 18 个
-- 签名阈值：`Math.ceil(relayer_count * 2 / 3)`
+- 签名阈值：`Math.ceil(relayer_count * 2 / 3)` （当签名数 >= 阈值时解锁）
 - Relayer 私钥列表：每个 relayer 独立保管
 
 **阈值示例：**
 - 3 个 Relayer → 阈值 2
 - 4 个 Relayer → 阈值 3
 - 5 个 Relayer → 阈值 4
-- 18 个 Relayer → 阈值 13
+- 18 个 Relayer → 阈值 12
 
 ### Nonce 处理
 

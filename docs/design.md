@@ -466,8 +466,8 @@ await program.methods
 ### 多签阈值
 
 - 阈值计算：`Math.ceil(relayer_count * 2 / 3)`
-- 需要超过 2/3 的 relayer 签名才能解锁
-- 最多支持 18 个 relayer，阈值范围：2-13
+- 当签名数 >= 阈值时解锁（即 2/3 向上取整的 relayer 签名）
+- 最多支持 18 个 relayer，阈值范围：2-12
 
 ### 权限控制
 
