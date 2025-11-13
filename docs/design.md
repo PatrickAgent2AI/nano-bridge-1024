@@ -27,6 +27,24 @@
 用户 → 发送端合约（质押） → 触发事件 → Relayer监听 → 签名验证 → 接收端合约（解锁）
 ```
 
+### 多签钱包与 PDA 金库架构
+
+**设计原则：**
+- **管理操作**：使用 Squad 多签钱包，提高安全性
+- **业务操作**：使用 PDA 金库，提高效率
+- **职责分离**：管理操作由多签控制（外部处理），业务操作由 PDA 自动执行（合约控制）
+
+**架构优势：**
+- **性能优化**：解锁操作使用 PDA，无需多签投票，快速执行
+- **安全性**：管理接口多签保护，防止单点故障；金库资金 PDA 控制，只能通过合约逻辑操作
+- **灵活性**：可以随时增加/减少金库流动性；多签成员可以变更（外部处理）
+- **简洁性**：合约逻辑保持简洁，不处理多签提案
+
+**Squad 多签程序：**
+- 程序地址：`SMPLecH534NA9acB4bMolv7X6RBpK4rjn3LkN1gZXYjy`
+- 用于管理操作的多签钱包创建和管理
+- 多签投票在外部处理，合约不关心多签逻辑
+
 ---
 
 ## 数据存储设计
@@ -41,8 +59,8 @@
 
 ```rust
 pub struct ReceiverState {
-    pub vault: Pubkey,              // 32 bytes
-    pub admin: Pubkey,              // 32 bytes
+    pub vault: Pubkey,              // 32 bytes (PDA金库地址)
+    pub admin: Pubkey,              // 32 bytes (多签钱包地址)
     pub relayer_count: u64,         // 8 bytes
     pub source_contract: Pubkey,     // 32 bytes
     pub source_chain_id: u64,       // 8 bytes
@@ -51,6 +69,10 @@ pub struct ReceiverState {
     pub last_nonce: u64,            // 8 bytes (用于nonce递增判断)
 }
 ```
+
+**设计说明：**
+- `vault`: PDA金库地址，由程序控制，支持自动转账
+- `admin`: 多签钱包地址，用于管理操作（合约层面只验证签名，不关心多签逻辑）
 
 **账户大小计算：**
 - Base: 120 bytes
@@ -162,12 +184,45 @@ pub struct ReceiverState {
 }
 ```
 
+#### 金库设计（PDA）
+
+**重要设计决策：** 金库使用 PDA（Program Derived Address）而不是普通钱包或多签钱包。
+
+**PDA 种子：** `[b"vault"]`
+
+**设计优势：**
+- **自动转账**：合约可以直接控制 PDA，无需外部签名即可执行转账
+- **安全性**：PDA 由程序控制，无法被外部直接操作
+- **解锁效率**：达到阈值后立即执行解锁，无需等待多签投票
+- **简化实现**：无需处理多签提案机制，保持合约逻辑简洁
+
+**Token Account PDA：**
+- 种子：`[b"vault_token", usdc_mint]`
+- 所有者：vault PDA
+- 用途：存储 USDC 代币
+
+#### 管理钱包设计（多签）
+
+**重要设计决策：** 所有管理接口使用多签钱包调用，但合约层面不关心多签逻辑。
+
+**设计说明：**
+- `admin` 字段存储多签钱包地址
+- 合约只验证 `admin` 签名，不关心是否是多签
+- 多签逻辑在外部（Squad 程序）处理
+- 管理接口包括：`initialize`, `configure_usdc`, `configure_peer`, `add_relayer`, `remove_relayer`, `add_liquidity`, `withdraw_liquidity`
+
+**优势：**
+- 合约保持简洁，无需处理多签提案
+- 管理操作需要多签保护，提高安全性
+- 向后兼容，现有代码基本不需要修改
+
 #### 主要功能
 
 1. **initialize**: 统一初始化发送端和接收端合约
    - 创建 `SenderState` 账户
    - 创建 `ReceiverState` 账户
-   - 设置共享的 vault 和 admin
+   - 创建 PDA 金库（vault）和对应的 token account
+   - 设置 admin 为多签钱包地址
    - 初始化 nonce 为 0
    - 初始化 last_nonce 为 0
 
@@ -194,6 +249,18 @@ pub struct ReceiverState {
 
 6. **submit_signature** (接收端): 提交签名并检查阈值
    - **验证USDC地址已配置**：如果 `receiver_state.usdc_mint` 为无效地址（如 `Pubkey::default()`），返回错误
+   - 解锁操作使用 PDA 金库作为 authority，自动执行转账
+
+7. **add_liquidity** (接收端): 增加流动性
+   - 从多签钱包（admin）转账到 PDA 金库
+   - 需要 admin 签名（多签钱包）
+   - 用于向金库注入资金
+
+8. **withdraw_liquidity** (接收端): 提取流动性
+   - 从 PDA 金库转账到多签钱包（admin）
+   - 需要 admin 签名（多签钱包）
+   - 使用 PDA 作为 authority 执行转账
+   - 用于从金库提取资金
 
 #### submit_signature 流程
 
@@ -209,7 +276,8 @@ pub struct ReceiverState {
 7. 记录签名到 CrossChainRequest.signed_relayers
 8. 计算签名数量，检查是否达到阈值（> 2/3 relayer_count）
 9. 如果达到阈值：
-   - 从金库转账到接收地址（使用配置的 usdc_mint）
+   - 从 PDA 金库转账到接收地址（使用配置的 usdc_mint）
+   - 使用 PDA 作为 authority，无需外部签名
    - 更新 last_nonce = nonce（标记为已使用）
    - 标记 CrossChainRequest.is_unlocked = true
    - 可选：关闭 CrossChainRequest 账户回收租金
@@ -312,6 +380,44 @@ struct ReceiverState {
 
 ## 安全考虑
 
+### 多签钱包管理
+
+**Squad 多签程序：**
+- 程序地址：`SMPLecH534NA9acB4bMolv7X6RBpK4rjn3LkN1gZXYjy`
+- 主要功能：创建多签账户、提案和投票、执行提案
+
+**实现方式：**
+- 所有管理接口使用 Squad 多签钱包作为 `admin`
+- 合约层面只验证 `admin` 签名，不关心多签逻辑
+- 多签投票在外部（Squad 程序）处理
+- 管理接口包括：`initialize`, `configure_usdc`, `configure_peer`, `add_relayer`, `remove_relayer`, `add_liquidity`, `withdraw_liquidity`
+
+**使用示例：**
+```typescript
+// 创建 Squad 多签账户
+const squad = new Squad(provider);
+const multisig = await squad.createMultisig({
+  threshold: 2,  // 需要2个签名
+  members: [admin1, admin2, admin3],
+});
+
+// 使用多签钱包作为 admin 初始化合约
+await program.methods
+  .initialize()
+  .accounts({
+    admin: multisig.publicKey,  // 多签钱包地址
+    vault: vaultPda,  // PDA 金库地址
+    // ...
+  })
+  .rpc();  // 需要多签成员签名（外部处理）
+```
+
+**注意事项：**
+- 多签操作需要额外的 gas 费用
+- 多签投票需要等待，但只影响管理操作，不影响业务操作（解锁使用 PDA）
+- 需要确保 Squad 程序在目标链（1024chain）上可用
+- 多签成员可以变更（外部处理）
+
 ### 防重放攻击
 
 1. **Nonce 递增判断机制**：
@@ -388,4 +494,6 @@ struct ReceiverState {
 |------|----------|
 | 2025-11-14 | 初始设计文档，采用 PDA 方案支持无限请求和 21 个 relayer |
 | 2025-11-15 | 重构设计：支持 18 个 relayer；nonce 使用递增判断机制；统一初始化函数；支持 100+ 未完成请求和 1200+ 签名缓存 |
+| 2025-11-15 | **多签钱包集成**：管理接口使用多签钱包（Squad），合约层面不关心多签逻辑；金库使用 PDA 支持自动转账；新增流动性管理接口（add_liquidity, withdraw_liquidity） |
+| 2025-11-15 | 整合 Squad 多签文档内容到设计文档和 API 文档，删除独立的 squad_multisig.md 文档 |
 

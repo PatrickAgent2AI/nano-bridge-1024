@@ -1175,3 +1175,372 @@ anchor test --skip-build -- --grep "TC-001"
    - 优化 nonce 递增判断的性能（O(1) 操作）
    - 优化多签阈值检查的性能
 
+---
+
+## EVM 测试实现说明
+
+### 测试框架和工具
+
+**测试框架：**
+- Foundry (Forge) 测试框架
+- Solidity 测试合约
+- Hardhat 可选（用于更复杂的集成测试）
+
+**密码学库：**
+- Solidity 内置 `ecrecover` 函数用于 ECDSA 签名验证
+- `keccak256` 哈希函数用于事件数据哈希
+- OpenZeppelin 库（可选，用于标准接口）
+
+**测试工具：**
+- `forge test` - 运行测试
+- `forge coverage` - 代码覆盖率
+- `forge snapshot` - Gas 快照
+- `anvil` - 本地测试节点
+
+### 测试代码结构
+
+**文件位置：** `evm/bridge1024/test/Bridge1024.t.sol`
+
+**主要测试套件：**
+1. **Unified Contract Tests（统一合约测试）**
+   - TC-001：统一初始化（发送端和接收端同时初始化）
+   - TC-002：配置USDC代币地址
+   - TC-003：统一对端配置（发送端和接收端同时配置）
+   - TC-003B：统一对端配置 - 非管理员权限
+   
+2. **Sender Contract Tests（发送端合约测试）**
+   - TC-004：质押功能 - 成功场景
+   - TC-005：质押功能 - 余额不足
+   - TC-006：质押功能 - 未授权
+   - TC-007：质押功能 - USDC地址未配置
+   - TC-008：质押事件完整性
+   
+3. **Receiver Contract Tests（接收端合约测试）**
+   - TC-101：添加 Relayer - 管理员权限
+   - TC-102：移除 Relayer - 管理员权限
+   - TC-103：添加/移除 Relayer - 非管理员权限
+   - TC-104：提交签名 - 单个 Relayer（未达到阈值）
+   - TC-105：提交签名 - 达到阈值并解锁
+   - TC-106：提交签名 - Nonce递增判断（重放攻击防御）
+   - TC-107：提交签名 - 无效签名
+   - TC-108：提交签名 - 非白名单 Relayer
+   - TC-109：提交签名 - USDC地址未配置
+   - TC-110：提交签名 - 错误的源链合约地址
+   - TC-111：提交签名 - 错误的 Chain ID
+   
+4. **Integration Tests（集成测试）**
+   - IT-001：端到端跨链转账（EVM → SVM）
+   - IT-002：端到端跨链转账（SVM → EVM）
+   - IT-003：并发跨链转账
+   - IT-004：大额转账测试
+   
+5. **Security Tests（安全测试）**
+   - ST-001：Nonce递增判断机制（重放攻击防御）
+   - ST-002：签名伪造防御
+   - ST-003：权限控制测试
+   - ST-004：金库安全测试
+   - ST-005：伪造事件防御
+   
+6. **Performance Tests（性能测试）**
+   - PT-001：事件监听延迟
+   - PT-002：签名提交延迟
+   - PT-003：端到端延迟
+   - PT-004：吞吐量测试
+
+### 密码学实现细节
+
+#### ECDSA 签名流程
+
+```solidity
+// 1. 事件数据哈希（keccak256）
+function hashEventData(StakeEventData memory eventData) internal pure returns (bytes32) {
+    return keccak256(abi.encodePacked(
+        eventData.sourceContract,
+        eventData.targetContract,
+        eventData.chainId,
+        eventData.blockHeight,
+        eventData.amount,
+        eventData.receiverAddress,
+        eventData.nonce
+    ));
+}
+
+// 2. 生成签名（在测试中使用 ethers.js 或 foundry 的 vm.sign）
+// 在测试中，使用 ethers.js:
+// const hash = hashEventData(eventData);
+// const signature = await relayer.signMessage(ethers.utils.arrayify(hash));
+
+// 3. 验证签名（在合约中使用 ecrecover）
+function verifySignature(
+    bytes32 hash,
+    bytes memory signature,
+    address expectedSigner
+) internal pure returns (bool) {
+    require(signature.length == 65, "Invalid signature length");
+    
+    bytes32 r;
+    bytes32 s;
+    uint8 v;
+    
+    assembly {
+        r := mload(add(signature, 32))
+        s := mload(add(signature, 64))
+        v := byte(0, mload(add(signature, 96)))
+    }
+    
+    if (v < 27) {
+        v += 27;
+    }
+    
+    require(v == 27 || v == 28, "Invalid signature v value");
+    
+    address recovered = ecrecover(hash, v, r, s);
+    return recovered != address(0) && recovered == expectedSigner;
+}
+```
+
+#### Relayer 白名单和阈值管理
+
+- **阈值计算：** `threshold = (relayerCount * 2 + 2) / 3` （向上取整）
+- **示例：**
+  - 3 个 Relayer → 阈值 2
+  - 4 个 Relayer → 阈值 3
+  - 5 个 Relayer → 阈值 4
+  - 18 个 Relayer → 阈值 13
+
+#### Nonce 递增判断机制
+
+- **Nonce 类型：** 64 位无符号整数（uint64）
+- **递增判断：** 新 nonce 必须大于 `lastNonce`，否则视为重放攻击
+- **溢出处理：** 当 nonce 达到 `type(uint64).max` (18,446,744,073,709,551,615) 时，重置为 0
+- **实现逻辑：**
+  ```solidity
+  require(nonce > lastNonce, "Nonce must be greater than last nonce");
+  // 处理签名...
+  lastNonce = nonce;
+  ```
+
+#### 存储设计
+
+EVM 合约使用 mapping 存储，无大小限制：
+
+```solidity
+struct NonceSignature {
+    mapping(address => bool) signedRelayers;
+    uint8 signatureCount;
+    bool isUnlocked;
+    StakeEventData eventData;
+}
+
+mapping(uint256 => NonceSignature) public nonceSignatures;
+mapping(uint256 => bool) public usedNonces;  // 可选，用于额外验证
+```
+
+**设计优势：**
+- 支持理论上无限个未完成的请求
+- 支持无限个签名缓存
+- 每个 nonce 独立存储，支持并发处理
+- 使用 mapping，查询和更新都是 O(1) 操作
+
+### 事件数据结构
+
+```solidity
+struct StakeEventData {
+    address sourceContract;    // 发送端合约地址
+    address targetContract;    // 接收端合约地址
+    uint256 chainId;           // 链 ID
+    uint256 blockHeight;       // 区块高度
+    uint256 amount;            // 质押数量（USDC，6位小数）
+    string receiverAddress;    // 接收地址
+    uint64 nonce;              // 防重放序号（64位无符号整数，溢出时重置为0）
+}
+
+event StakeEvent(
+    address indexed sourceContract,
+    address indexed targetContract,
+    uint256 chainId,
+    uint256 blockHeight,
+    uint256 amount,
+    string receiverAddress,
+    uint64 nonce
+);
+```
+
+### 统一初始化流程
+
+**EVM 平台：**
+1. 调用 `initialize(vaultAddress, adminAddress)` 初始化发送端和接收端合约
+2. 调用 `configure_usdc(usdcAddress)` 配置USDC ERC20合约地址（必须在stake和submit_signature之前配置）
+3. 调用 `configure_peer(peerContract, sourceChainId, targetChainId)` 统一配置对端合约和链ID
+
+### 测试账户配置
+
+```solidity
+// 管理账户
+address admin;           // 管理员账户
+address vault;           // 金库账户
+
+// 用户账户
+address user1;           // 测试用户1
+address user2;           // 测试用户2
+
+// Relayer 账户
+address relayer1;        // 白名单 Relayer 1
+address relayer2;        // 白名单 Relayer 2
+address relayer3;        // 白名单 Relayer 3
+address nonRelayer;      // 非白名单账户
+
+// 其他
+address nonAdmin;        // 非管理员账户
+```
+
+### 测试配置参数
+
+```solidity
+uint256 constant SOURCE_CHAIN_ID = 421614;        // Arbitrum Sepolia
+uint256 constant TARGET_CHAIN_ID = 91024;         // 1024chain testnet（待确认）
+uint256 constant TEST_AMOUNT = 100 * 10**6;       // 100 USDC (6 decimals)
+uint256 constant MAX_RELAYERS = 18;               // 最多18个relayer
+uint8 constant MIN_THRESHOLD = 2;                 // 最小阈值（3个relayer时）
+uint8 constant MAX_THRESHOLD = 13;               // 最大阈值（18个relayer时）
+```
+
+### USDC Mock 代币
+
+在测试中需要部署一个 Mock USDC 代币合约：
+
+```solidity
+contract MockUSDC is ERC20 {
+    constructor() ERC20("USD Coin", "USDC") {
+        _mint(msg.sender, 1000000 * 10**6); // 铸造100万USDC用于测试
+    }
+    
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+```
+
+### 测试辅助函数
+
+```solidity
+// 生成事件数据哈希
+function hashEventData(StakeEventData memory eventData) internal pure returns (bytes32) {
+    return keccak256(abi.encodePacked(
+        eventData.sourceContract,
+        eventData.targetContract,
+        eventData.chainId,
+        eventData.blockHeight,
+        eventData.amount,
+        eventData.receiverAddress,
+        eventData.nonce
+    ));
+}
+
+// 生成签名（在测试中使用 foundry 的 vm.sign）
+function signEventData(
+    StakeEventData memory eventData,
+    uint256 privateKey
+) internal pure returns (bytes memory) {
+    bytes32 hash = hashEventData(eventData);
+    // 使用 foundry 的 vm.sign 或 ethers.js 的 signMessage
+    // 这里需要在测试合约中使用 vm.sign
+    return abi.encodePacked(r, s, v);
+}
+
+// 验证阈值
+function calculateThreshold(uint256 relayerCount) internal pure returns (uint256) {
+    return (relayerCount * 2 + 2) / 3; // 向上取整
+}
+```
+
+### 运行测试
+
+```bash
+# 安装依赖（如果使用 foundry）
+cd evm/bridge1024
+forge install
+
+# 编译合约
+forge build
+
+# 运行所有测试
+forge test
+
+# 运行特定测试
+forge test --match-test testTC001
+
+# 运行测试并显示详细输出
+forge test -vvv
+
+# 生成代码覆盖率报告
+forge coverage
+
+# 生成 Gas 快照
+forge snapshot
+
+# 使用本地节点（anvil）
+anvil
+forge test --fork-url http://localhost:8545
+```
+
+### 测试最佳实践
+
+1. **使用 Foundry 的作弊码（Cheatcodes）**
+   - `vm.startPrank(address)` - 模拟交易发送者
+   - `vm.deal(address, amount)` - 给地址发送 ETH
+   - `vm.expectRevert()` - 期望交易回滚
+   - `vm.expectEmit()` - 验证事件发出
+   - `vm.sign(privateKey, hash)` - 生成签名
+
+2. **测试隔离**
+   - 每个测试函数应该独立，不依赖其他测试的状态
+   - 使用 `setUp()` 函数初始化测试环境
+
+3. **Gas 优化测试**
+   - 使用 `forge snapshot` 跟踪 Gas 使用
+   - 确保关键操作的 Gas 消耗在合理范围内
+
+4. **边界条件测试**
+   - 测试 nonce 溢出情况
+   - 测试最大 relayer 数量（18个）
+   - 测试大额转账（接近 uint256 最大值）
+
+5. **安全测试**
+   - 测试重放攻击防御
+   - 测试签名伪造防御
+   - 测试权限控制
+   - 测试金库安全
+
+### 下一步工作
+
+1. **完成 EVM 合约实现**
+   - 实现统一初始化函数（发送端和接收端）
+   - 实现 USDC 配置函数
+   - 实现统一对端配置函数
+   - 实现发送端质押功能
+   - 实现接收端签名验证和解锁功能
+   - 实现 Relayer 白名单管理
+   - 实现 nonce 递增判断机制
+
+2. **实现测试用例**
+   - 按照测试计划实现所有测试用例
+   - 使用 TDD 方法，先写测试再实现功能
+   - 确保所有测试通过
+
+3. **代码覆盖率**
+   - 目标：> 90% 代码覆盖率
+   - 使用 `forge coverage` 检查覆盖率
+
+4. **安全审计准备**
+   - 完善错误处理
+   - 添加事件日志
+   - 验证 nonce 递增判断机制的安全性
+   - 验证签名验证的安全性
+   - 准备审计文档
+
+5. **性能优化**
+   - 优化 Gas 消耗
+   - 优化存储布局
+   - 优化事件数据结构
+

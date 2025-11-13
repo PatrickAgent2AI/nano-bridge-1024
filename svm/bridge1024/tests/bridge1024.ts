@@ -4,6 +4,7 @@ import { Bridge1024 } from "../target/types/bridge1024";
 import { expect } from "chai";
 import * as crypto from "crypto";
 import { Keypair, PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { TOKEN_PROGRAM_ID, getAssociatedTokenAddress, createMint, createAccount, mintTo } from "@solana/spl-token";
 import BN from "bn.js";
 
 describe("bridge1024", () => {
@@ -29,10 +30,12 @@ describe("bridge1024", () => {
   let relayer3: Keypair;
   let nonRelayer: Keypair;
   let nonAdmin: Keypair;
-  let usdcMint: Keypair;
+  let usdcMint: PublicKey;
   let senderState: PublicKey;
   let receiverState: PublicKey;
   let peerContract: Keypair;
+  let user1TokenAccount: PublicKey;
+  let vaultTokenAccount: PublicKey;
 
   interface StakeEventData {
     sourceContract: PublicKey;
@@ -84,6 +87,23 @@ describe("bridge1024", () => {
     return Math.ceil(relayerCount * 2 / 3);
   }
 
+  async function getStakeAccounts(user: Keypair) {
+    const userTokenAccount = await getAssociatedTokenAddress(
+      usdcMint,
+      user.publicKey
+    );
+    return {
+      user: user.publicKey,
+      senderState: senderState,
+      vault: vault.publicKey,
+      usdcMint: usdcMint,
+      userTokenAccount: userTokenAccount,
+      vaultTokenAccount: vaultTokenAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    };
+  }
+
   before(async () => {
     admin = Keypair.generate();
     vault = Keypair.generate();
@@ -94,7 +114,6 @@ describe("bridge1024", () => {
     relayer3 = Keypair.generate();
     nonRelayer = Keypair.generate();
     nonAdmin = Keypair.generate();
-    usdcMint = Keypair.generate();
     peerContract = Keypair.generate();
 
     const airdropAmount = AIRDROP_AMOUNT;
@@ -146,11 +165,63 @@ describe("bridge1024", () => {
       program.programId
     );
     receiverState = receiverStatePda;
+
+    // Create USDC mint
+    usdcMint = await createMint(
+      provider.connection,
+      admin,
+      admin.publicKey,
+      null,
+      6 // 6 decimals for USDC
+    );
+
+    // Create token accounts
+    user1TokenAccount = await getAssociatedTokenAddress(
+      usdcMint,
+      user1.publicKey
+    );
+    vaultTokenAccount = await getAssociatedTokenAddress(
+      usdcMint,
+      vault.publicKey
+    );
+
+    // Create token accounts if they don't exist
+    try {
+      await createAccount(
+        provider.connection,
+        user1,
+        usdcMint,
+        user1.publicKey
+      );
+    } catch (e) {
+      // Account might already exist
+    }
+
+    try {
+      await createAccount(
+        provider.connection,
+        vault,
+        usdcMint,
+        vault.publicKey
+      );
+    } catch (e) {
+      // Account might already exist
+    }
+
+    // Mint tokens to user1
+    await mintTo(
+      provider.connection,
+      admin,
+      usdcMint,
+      user1TokenAccount,
+      admin,
+      1000000_000000 // 1,000,000 USDC with 6 decimals
+    );
   });
 
   describe("Unified Contract Tests", () => {
     describe("TC-001: 统一初始化合约", () => {
-      it.skip("should initialize both sender and receiver contracts", async () => {
+      it("should initialize both sender and receiver contracts", async () => {
         await program.methods
           .initialize()
           .accounts({
@@ -177,9 +248,9 @@ describe("bridge1024", () => {
     });
 
     describe("TC-002: 配置USDC代币地址", () => {
-      it.skip("should configure USDC token address", async () => {
+      it("should configure USDC token address", async () => {
         await program.methods
-          .configureUsdc(usdcMint.publicKey)
+          .configureUsdc(usdcMint)
           .accounts({
             admin: admin.publicKey,
             senderState: senderState,
@@ -191,13 +262,13 @@ describe("bridge1024", () => {
         const senderStateAccount = await program.account.senderState.fetch(senderState);
         const receiverStateAccount = await program.account.receiverState.fetch(receiverState);
 
-        expect(senderStateAccount.usdcMint.toBase58()).to.equal(usdcMint.publicKey.toBase58());
-        expect(receiverStateAccount.usdcMint.toBase58()).to.equal(usdcMint.publicKey.toBase58());
+        expect(senderStateAccount.usdcMint.toBase58()).to.equal(usdcMint.toBase58());
+        expect(receiverStateAccount.usdcMint.toBase58()).to.equal(usdcMint.toBase58());
       });
     });
 
     describe("TC-003: 统一对端配置", () => {
-      it.skip("should configure peer contract and chain IDs", async () => {
+      it("should configure peer contract and chain IDs", async () => {
         await program.methods
           .configurePeer(peerContract.publicKey, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
           .accounts({
@@ -219,7 +290,7 @@ describe("bridge1024", () => {
         expect(receiverStateAccount.targetChainId.toString()).to.equal(TARGET_CHAIN_ID.toString());
       });
 
-      it.skip("should reject non-admin configuration", async () => {
+      it("should reject non-admin configuration", async () => {
         try {
           await program.methods
             .configurePeer(peerContract.publicKey, SOURCE_CHAIN_ID, TARGET_CHAIN_ID)
@@ -240,19 +311,25 @@ describe("bridge1024", () => {
 
   describe("Sender Contract Tests", () => {
     describe("TC-004: 质押功能 - 成功场景", () => {
-      it.skip("should successfully stake USDC", async () => {
+      it("should successfully stake USDC", async () => {
+        // First configure USDC
+        await program.methods
+          .configureUsdc(usdcMint)
+          .accounts({
+            admin: admin.publicKey,
+            senderState: senderState,
+            receiverState: receiverState,
+          })
+          .signers([admin])
+          .rpc();
+
         const receiverAddress = user2.publicKey.toBase58();
         const initialNonce = (await program.account.senderState.fetch(senderState)).nonce;
 
+        const accounts = await getStakeAccounts(user1);
         await program.methods
           .stake(TEST_AMOUNT, receiverAddress)
-          .accounts({
-            user: user1.publicKey,
-            senderState: senderState,
-            vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
+          .accounts(accounts)
           .signers([user1])
           .rpc();
 
