@@ -302,6 +302,40 @@ pub struct ReceiverState {
 
 ## EVM 合约设计
 
+### 金库和管理员地址设计
+
+**重要设计决策：** EVM 合约中的金库地址（vault）和管理员地址（admin）**完全支持多签钱包**（如 Gnosis Safe），合约层面将其视为普通地址。
+
+**设计说明：**
+- **多签钱包兼容性**：在 EVM 中，多签钱包（如 Gnosis Safe）实际上就是一个普通的 `address` 类型
+- **合约透明性**：从合约的角度来看，多签钱包和普通 EOA（Externally Owned Account）没有区别
+- **权限检查**：合约只需要验证 `msg.sender == admin` 或 `msg.sender == vault`，不需要关心它们是否是多签
+- **多签逻辑外部化**：多签的投票、阈值检查等逻辑在外部处理（Gnosis Safe 合约），当多签通过后，会以多签钱包地址的身份调用我们的合约
+
+**优势：**
+- **向后兼容**：支持普通 EOA 和多签钱包，无需修改合约代码
+- **安全性提升**：管理员和金库可以使用多签钱包，提高资金和管理操作的安全性
+- **实现简洁**：合约保持简洁，无需处理多签提案机制
+- **灵活性**：部署时可以选择使用普通地址或多签地址，根据安全需求灵活配置
+
+**使用示例：**
+```solidity
+// 初始化时，vault 和 admin 可以是多签钱包地址
+initialize(
+    vaultAddress,  // 可以是 Gnosis Safe 多签钱包地址
+    adminAddress   // 可以是 Gnosis Safe 多签钱包地址
+);
+
+// 权限检查时，合约只验证地址，不关心是否是多签
+modifier onlyAdmin() {
+    require(msg.sender == admin, "Only admin");
+    _;
+}
+
+// 转账时，从金库（可能是多签钱包）转账
+IERC20(usdcContract).transferFrom(vault, receiver, amount);
+```
+
 ### 发送端合约
 
 与 SVM 发送端合约功能相同，使用 Solidity 实现。
@@ -309,8 +343,8 @@ pub struct ReceiverState {
 **账户结构：**
 ```solidity
 struct SenderState {
-    address vault;
-    address admin;
+    address vault;              // 金库地址（可以是多签钱包）
+    address admin;              // 管理员地址（可以是多签钱包）
     address usdcContract;        // USDC ERC20合约地址（未配置时为address(0)）
     uint64 nonce;
     address targetContract;
@@ -321,6 +355,7 @@ struct SenderState {
 
 **stake 函数验证：**
 - 检查 `usdcContract != address(0)`，否则返回错误 "USDC address not configured"
+- 从用户地址转账到金库地址（`vault`），金库可以是多签钱包
 
 ### 接收端合约
 
@@ -329,8 +364,8 @@ struct SenderState {
 **账户结构：**
 ```solidity
 struct ReceiverState {
-    address vault;
-    address admin;
+    address vault;              // 金库地址（可以是多签钱包）
+    address admin;              // 管理员地址（可以是多签钱包）
     address usdcContract;        // USDC ERC20合约地址（未配置时为address(0)）
     uint64 relayerCount;
     address sourceContract;
@@ -343,10 +378,11 @@ struct ReceiverState {
 
 **submit_signature 函数验证：**
 - 检查 `usdcContract != address(0)`，否则返回错误 "USDC address not configured"
+- 达到阈值后，从金库地址（`vault`）转账到接收地址，金库可以是多签钱包
 
 ### 配置接口
 
-1. **initialize**: 初始化合约（设置vault和admin）
+1. **initialize**: 初始化合约（设置vault和admin，可以是多签钱包地址）
 2. **configure_usdc**: 配置USDC ERC20合约地址（必须在使用前配置）
 3. **configure_peer**: 配置对端合约和链ID
 

@@ -53,7 +53,13 @@ describe("bridge1024", () => {
       publicKeyEncoding: { type: "spki", format: "pem" },
       privateKeyEncoding: { type: "pkcs8", format: "pem" },
     });
-    return { publicKey, privateKey };
+    const publicKeyObj = crypto.createPublicKey(publicKey);
+    const publicKeyDer = publicKeyObj.export({ type: "spki", format: "der" });
+    const publicKeyUncompressed = Buffer.alloc(65);
+    publicKeyUncompressed[0] = 0x04;
+    const keyData = publicKeyDer.slice(publicKeyDer.length - 64);
+    keyData.copy(publicKeyUncompressed, 1);
+    return { publicKey: publicKeyUncompressed, privateKey, publicKeyPem: publicKey };
   }
 
   function hashEventData(eventData: StakeEventData): Buffer {
@@ -76,11 +82,11 @@ describe("bridge1024", () => {
     return sign.sign(privateKey);
   }
 
-  function verifySignature(eventData: StakeEventData, signature: Buffer, publicKey: string): boolean {
+  function verifySignature(eventData: StakeEventData, signature: Buffer, publicKeyPem: string): boolean {
     const hash = hashEventData(eventData);
     const verify = crypto.createVerify("SHA256");
     verify.update(hash);
-    return verify.verify(publicKey, signature);
+    return verify.verify(publicKeyPem, signature);
   }
 
   function calculateThreshold(relayerCount: number): number {
@@ -166,13 +172,15 @@ describe("bridge1024", () => {
     );
     receiverState = receiverStatePda;
 
-    // Create USDC mint
+    // Create mock USDC SPL token mint for testing
+    // This is a test mock token, not the real USDC token
+    // It has 6 decimals like real USDC
     usdcMint = await createMint(
       provider.connection,
       admin,
       admin.publicKey,
       null,
-      6 // 6 decimals for USDC
+      6 // 6 decimals for USDC (mock token)
     );
 
     // Create token accounts
@@ -339,20 +347,15 @@ describe("bridge1024", () => {
     });
 
     describe("TC-005: 质押功能 - 余额不足", () => {
-      it.skip("should reject stake when balance is insufficient", async () => {
+      it("should reject stake when balance is insufficient", async () => {
         const largeAmount = new BN(1000000_000000);
         const receiverAddress = user2.publicKey.toBase58();
 
+        const accounts = await getStakeAccounts(user1);
         try {
           await program.methods
             .stake(largeAmount, receiverAddress)
-            .accounts({
-              user: user1.publicKey,
-              senderState: senderState,
-              vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
-              systemProgram: SystemProgram.programId,
-            })
+            .accounts(accounts)
             .signers([user1])
             .rpc();
           expect.fail("Should have thrown an error");
@@ -363,20 +366,33 @@ describe("bridge1024", () => {
     });
 
     describe("TC-006: 质押功能 - 未授权", () => {
-      it.skip("should reject stake when not authorized", async () => {
+      it("should reject stake when not authorized", async () => {
         const receiverAddress = user2.publicKey.toBase58();
+        const userWithoutTokenAccount = Keypair.generate();
+        await provider.connection.confirmTransaction(
+          await provider.connection.requestAirdrop(userWithoutTokenAccount.publicKey, AIRDROP_AMOUNT),
+          "confirmed"
+        );
+
+        const userTokenAccount = await getAssociatedTokenAddress(
+          usdcMint,
+          userWithoutTokenAccount.publicKey
+        );
 
         try {
           await program.methods
             .stake(TEST_AMOUNT, receiverAddress)
             .accounts({
-              user: user1.publicKey,
+              user: userWithoutTokenAccount.publicKey,
               senderState: senderState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
+              userTokenAccount: userTokenAccount,
+              vaultTokenAccount: vaultTokenAccount,
+              tokenProgram: TOKEN_PROGRAM_ID,
               systemProgram: SystemProgram.programId,
             })
-            .signers([user1])
+            .signers([userWithoutTokenAccount])
             .rpc();
           expect.fail("Should have thrown an error");
         } catch (err) {
@@ -386,18 +402,43 @@ describe("bridge1024", () => {
     });
 
     describe("TC-007: 质押功能 - USDC地址未配置", () => {
-      it.skip("should reject stake when USDC address is not configured", async () => {
+      it("should reject stake when USDC address is not configured", async () => {
+        const newAdmin = Keypair.generate();
+        await provider.connection.confirmTransaction(
+          await provider.connection.requestAirdrop(newAdmin.publicKey, AIRDROP_AMOUNT),
+          "confirmed"
+        );
+
+        const [newSenderState] = PublicKey.findProgramAddressSync(
+          [Buffer.from("sender_state")],
+          program.programId
+        );
+        const [newReceiverState] = PublicKey.findProgramAddressSync(
+          [Buffer.from("receiver_state")],
+          program.programId
+        );
+
+        await program.methods
+          .initialize()
+          .accounts({
+            admin: newAdmin.publicKey,
+            vault: vault.publicKey,
+            senderState: newSenderState,
+            receiverState: newReceiverState,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([newAdmin])
+          .rpc();
+
         const receiverAddress = user2.publicKey.toBase58();
+        const accounts = await getStakeAccounts(user1);
 
         try {
           await program.methods
             .stake(TEST_AMOUNT, receiverAddress)
             .accounts({
-              user: user1.publicKey,
-              senderState: senderState,
-              vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
-              systemProgram: SystemProgram.programId,
+              ...accounts,
+              senderState: newSenderState,
             })
             .signers([user1])
             .rpc();
@@ -409,36 +450,34 @@ describe("bridge1024", () => {
     });
 
     describe("TC-008: 质押事件完整性", () => {
-      it.skip("should emit complete stake event", async () => {
+      it("should emit complete stake event", async () => {
         const receiverAddress = user2.publicKey.toBase58();
+        const accounts = await getStakeAccounts(user1);
 
-        await program.methods
+        const tx = await program.methods
           .stake(TEST_AMOUNT, receiverAddress)
-          .accounts({
-            user: user1.publicKey,
-            senderState: senderState,
-            vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
-            systemProgram: SystemProgram.programId,
-          })
+          .accounts(accounts)
           .signers([user1])
           .rpc();
 
         const senderStateAccount = await program.account.senderState.fetch(senderState);
         expect(senderStateAccount.nonce.toNumber()).to.be.greaterThan(0);
+
+        const events = await program.account.senderState.all();
+        expect(events.length).to.be.greaterThan(0);
       });
     });
   });
 
   describe("Receiver Contract Tests", () => {
     describe("TC-101: 添加 Relayer - 管理员权限", () => {
-      it.skip("should add relayer with ECDSA public key", async () => {
+      it("should add relayer with ECDSA public key", async () => {
         const relayer1Keypair = generateECDSAKeypair();
         const relayer2Keypair = generateECDSAKeypair();
         const relayer3Keypair = generateECDSAKeypair();
 
         await program.methods
-          .addRelayer(relayer1.publicKey, Buffer.from(relayer1Keypair.publicKey))
+          .addRelayer(relayer1.publicKey, relayer1Keypair.publicKey)
           .accounts({
             admin: admin.publicKey,
             receiverState: receiverState,
@@ -448,7 +487,7 @@ describe("bridge1024", () => {
           .rpc();
 
         await program.methods
-          .addRelayer(relayer2.publicKey, Buffer.from(relayer2Keypair.publicKey))
+          .addRelayer(relayer2.publicKey, relayer2Keypair.publicKey)
           .accounts({
             admin: admin.publicKey,
             receiverState: receiverState,
@@ -458,7 +497,7 @@ describe("bridge1024", () => {
           .rpc();
 
         await program.methods
-          .addRelayer(relayer3.publicKey, Buffer.from(relayer3Keypair.publicKey))
+          .addRelayer(relayer3.publicKey, relayer3Keypair.publicKey)
           .accounts({
             admin: admin.publicKey,
             receiverState: receiverState,
@@ -473,7 +512,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-102: 移除 Relayer - 管理员权限", () => {
-      it.skip("should remove relayer and ECDSA public key", async () => {
+      it("should remove relayer and ECDSA public key", async () => {
         await program.methods
           .removeRelayer(relayer1.publicKey)
           .accounts({
@@ -490,12 +529,12 @@ describe("bridge1024", () => {
     });
 
     describe("TC-103: 添加/移除 Relayer - 非管理员权限", () => {
-      it.skip("should reject non-admin add relayer", async () => {
+      it("should reject non-admin add relayer", async () => {
         const relayerKeypair = generateECDSAKeypair();
 
         try {
           await program.methods
-            .addRelayer(nonRelayer.publicKey, Buffer.from(relayerKeypair.publicKey))
+            .addRelayer(nonRelayer.publicKey, relayerKeypair.publicKey)
             .accounts({
               admin: nonAdmin.publicKey,
               receiverState: receiverState,
@@ -509,7 +548,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should reject non-admin remove relayer", async () => {
+      it("should reject non-admin remove relayer", async () => {
         try {
           await program.methods
             .removeRelayer(relayer1.publicKey)
@@ -528,7 +567,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-104: 提交签名 - 单个 Relayer（未达到阈值）", () => {
-      it.skip("should accept signature but not unlock when threshold not reached", async () => {
+      it("should accept signature but not unlock when threshold not reached", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -557,7 +596,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -569,7 +608,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-105: 提交签名 - 达到阈值并解锁", () => {
-      it.skip("should unlock when threshold is reached", async () => {
+      it("should unlock when threshold is reached", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -601,7 +640,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -622,7 +661,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -634,7 +673,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-106: 提交签名 - Nonce递增判断（重放攻击防御）", () => {
-      it.skip("should reject same nonce (replay attack)", async () => {
+      it("should reject same nonce (replay attack)", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -664,7 +703,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -675,7 +714,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should reject smaller nonce (replay attack)", async () => {
+      it("should reject smaller nonce (replay attack)", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -705,7 +744,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -716,7 +755,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should accept larger nonce (normal case)", async () => {
+      it("should accept larger nonce (normal case)", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -745,7 +784,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -754,7 +793,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-107: 提交签名 - 无效签名", () => {
-      it.skip("should reject invalid signature", async () => {
+      it("should reject invalid signature", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -784,7 +823,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -797,7 +836,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-108: 提交签名 - 非白名单 Relayer", () => {
-      it.skip("should reject non-whitelisted relayer", async () => {
+      it("should reject non-whitelisted relayer", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -827,7 +866,7 @@ describe("bridge1024", () => {
               relayer: nonRelayer.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([nonRelayer])
@@ -840,7 +879,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-109: 提交签名 - USDC地址未配置", () => {
-      it.skip("should reject when USDC address is not configured", async () => {
+      it("should reject when USDC address is not configured", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -870,7 +909,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -883,7 +922,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-110: 提交签名 - 错误的源链合约地址", () => {
-      it.skip("should reject wrong source contract address", async () => {
+      it("should reject wrong source contract address", async () => {
         const wrongSourceContract = Keypair.generate();
         const eventData: StakeEventData = {
           sourceContract: wrongSourceContract.publicKey,
@@ -914,7 +953,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -927,7 +966,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-111: 提交签名 - 错误的 Chain ID", () => {
-      it.skip("should reject wrong chain ID", async () => {
+      it("should reject wrong chain ID", async () => {
         const wrongChainId = new BN(999999);
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
@@ -958,7 +997,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -973,7 +1012,7 @@ describe("bridge1024", () => {
 
   describe("Integration Tests", () => {
     describe("IT-001: 端到端跨链转账（EVM → SVM）", () => {
-      it.skip("should complete end-to-end cross-chain transfer from EVM to SVM", async () => {
+      it("should complete end-to-end cross-chain transfer from EVM to SVM", async () => {
         const receiverAddress = user2.publicKey.toBase58();
 
         await program.methods
@@ -982,7 +1021,7 @@ describe("bridge1024", () => {
             user: user1.publicKey,
             senderState: senderState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([user1])
@@ -1022,7 +1061,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1043,7 +1082,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -1055,7 +1094,7 @@ describe("bridge1024", () => {
     });
 
     describe("IT-002: 端到端跨链转账（SVM → EVM）", () => {
-      it.skip("should complete end-to-end cross-chain transfer from SVM to EVM", async () => {
+      it("should complete end-to-end cross-chain transfer from SVM to EVM", async () => {
         const receiverAddress = "0x1234567890123456789012345678901234567890";
 
         await program.methods
@@ -1064,7 +1103,7 @@ describe("bridge1024", () => {
             user: user1.publicKey,
             senderState: senderState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([user1])
@@ -1104,7 +1143,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1125,7 +1164,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -1137,7 +1176,7 @@ describe("bridge1024", () => {
     });
 
     describe("IT-003: 并发跨链转账", () => {
-      it.skip("should handle concurrent cross-chain transfers", async () => {
+      it("should handle concurrent cross-chain transfers", async () => {
         const promises = [];
         for (let i = 0; i < 10; i++) {
           const receiverAddress = user2.publicKey.toBase58();
@@ -1148,7 +1187,7 @@ describe("bridge1024", () => {
                 user: user1.publicKey,
                 senderState: senderState,
                 vault: vault.publicKey,
-                usdcMint: usdcMint.publicKey,
+                usdcMint: usdcMint,
                 systemProgram: SystemProgram.programId,
               })
               .signers([user1])
@@ -1164,7 +1203,7 @@ describe("bridge1024", () => {
     });
 
     describe("IT-004: 大额转账测试", () => {
-      it.skip("should handle large amount transfer", async () => {
+      it("should handle large amount transfer", async () => {
         const largeAmount = new BN(10000_000000);
         const receiverAddress = user2.publicKey.toBase58();
 
@@ -1174,7 +1213,7 @@ describe("bridge1024", () => {
             user: user1.publicKey,
             senderState: senderState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([user1])
@@ -1188,7 +1227,7 @@ describe("bridge1024", () => {
 
   describe("Security Tests", () => {
     describe("ST-001: Nonce递增判断机制（重放攻击防御）", () => {
-      it.skip("should reject same nonce replay attack", async () => {
+      it("should reject same nonce replay attack", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1220,7 +1259,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1241,7 +1280,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -1266,7 +1305,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1277,7 +1316,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should reject smaller nonce replay attack", async () => {
+      it("should reject smaller nonce replay attack", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1307,7 +1346,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1318,7 +1357,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should handle nonce overflow correctly", async () => {
+      it("should handle nonce overflow correctly", async () => {
         const maxNonce = new BN("18446744073709551615");
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
@@ -1351,7 +1390,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1372,7 +1411,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -1384,7 +1423,7 @@ describe("bridge1024", () => {
     });
 
     describe("ST-002: 签名伪造防御", () => {
-      it.skip("should reject forged signature", async () => {
+      it("should reject forged signature", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1414,7 +1453,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1427,12 +1466,12 @@ describe("bridge1024", () => {
     });
 
     describe("ST-003: 权限控制测试", () => {
-      it.skip("should reject non-admin add relayer", async () => {
+      it("should reject non-admin add relayer", async () => {
         const relayerKeypair = generateECDSAKeypair();
 
         try {
           await program.methods
-            .addRelayer(nonRelayer.publicKey, Buffer.from(relayerKeypair.publicKey))
+            .addRelayer(nonRelayer.publicKey, relayerKeypair.publicKey)
             .accounts({
               admin: nonAdmin.publicKey,
               receiverState: receiverState,
@@ -1446,7 +1485,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should reject non-admin remove relayer", async () => {
+      it("should reject non-admin remove relayer", async () => {
         try {
           await program.methods
             .removeRelayer(relayer1.publicKey)
@@ -1465,7 +1504,7 @@ describe("bridge1024", () => {
     });
 
     describe("ST-004: 金库安全测试", () => {
-      it.skip("should prevent direct vault transfer", async () => {
+      it("should prevent direct vault transfer", async () => {
         try {
           const transferInstruction = SystemProgram.transfer({
             fromPubkey: vault.publicKey,
@@ -1483,7 +1522,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should prevent over-unlock", async () => {
+      it("should prevent over-unlock", async () => {
         const largeAmount = new BN(1000000_000000);
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
@@ -1517,7 +1556,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1538,7 +1577,7 @@ describe("bridge1024", () => {
               relayer: relayer2.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1551,7 +1590,7 @@ describe("bridge1024", () => {
     });
 
     describe("ST-005: 伪造事件防御和CrossChainRequest PDA安全", () => {
-      it.skip("should reject forged event with wrong contract address", async () => {
+      it("should reject forged event with wrong contract address", async () => {
         const wrongSourceContract = Keypair.generate();
         const eventData: StakeEventData = {
           sourceContract: wrongSourceContract.publicKey,
@@ -1582,7 +1621,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1593,7 +1632,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should reject forged event with wrong chain ID", async () => {
+      it("should reject forged event with wrong chain ID", async () => {
         const wrongChainId = new BN(999999);
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
@@ -1624,7 +1663,7 @@ describe("bridge1024", () => {
               relayer: relayer1.publicKey,
               receiverState: receiverState,
               vault: vault.publicKey,
-              usdcMint: usdcMint.publicKey,
+              usdcMint: usdcMint,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1635,7 +1674,7 @@ describe("bridge1024", () => {
         }
       });
 
-      it.skip("should isolate signatures for different nonces", async () => {
+      it("should isolate signatures for different nonces", async () => {
         const eventData1: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1675,7 +1714,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1696,7 +1735,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1707,7 +1746,7 @@ describe("bridge1024", () => {
 
   describe("Performance Tests", () => {
     describe("PT-001: 事件监听延迟", () => {
-      it.skip("should measure event listening latency", async () => {
+      it("should measure event listening latency", async () => {
         const startTime = Date.now();
         const receiverAddress = user2.publicKey.toBase58();
 
@@ -1717,7 +1756,7 @@ describe("bridge1024", () => {
             user: user1.publicKey,
             senderState: senderState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([user1])
@@ -1730,7 +1769,7 @@ describe("bridge1024", () => {
     });
 
     describe("PT-002: 签名提交延迟", () => {
-      it.skip("should measure signature submission latency", async () => {
+      it("should measure signature submission latency", async () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1761,7 +1800,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1774,7 +1813,7 @@ describe("bridge1024", () => {
     });
 
     describe("PT-003: 端到端延迟", () => {
-      it.skip("should measure end-to-end latency", async () => {
+      it("should measure end-to-end latency", async () => {
         const startTime = Date.now();
         const receiverAddress = user2.publicKey.toBase58();
 
@@ -1784,7 +1823,7 @@ describe("bridge1024", () => {
             user: user1.publicKey,
             senderState: senderState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([user1])
@@ -1824,7 +1863,7 @@ describe("bridge1024", () => {
             relayer: relayer1.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer1])
@@ -1845,7 +1884,7 @@ describe("bridge1024", () => {
             relayer: relayer2.publicKey,
             receiverState: receiverState,
             vault: vault.publicKey,
-            usdcMint: usdcMint.publicKey,
+            usdcMint: usdcMint,
             systemProgram: SystemProgram.programId,
           })
           .signers([relayer2])
@@ -1858,7 +1897,7 @@ describe("bridge1024", () => {
     });
 
     describe("PT-004: 吞吐量测试", () => {
-      it.skip("should measure throughput", async () => {
+      it("should measure throughput", async () => {
         const startTime = Date.now();
         const receiverAddress = user2.publicKey.toBase58();
         let successCount = 0;
@@ -1871,7 +1910,7 @@ describe("bridge1024", () => {
                 user: user1.publicKey,
                 senderState: senderState,
                 vault: vault.publicKey,
-                usdcMint: usdcMint.publicKey,
+                usdcMint: usdcMint,
                 systemProgram: SystemProgram.programId,
               })
               .signers([user1])
@@ -1891,7 +1930,7 @@ describe("bridge1024", () => {
 
   describe("Cryptographic Helper Tests", () => {
     describe("Hash Consistency Test", () => {
-      it.skip("should produce consistent hash for same event data", () => {
+      it("should produce consistent hash for same event data", () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1909,7 +1948,7 @@ describe("bridge1024", () => {
     });
 
     describe("ECDSA Signature Generation and Verification Test", () => {
-      it.skip("should generate and verify valid signature", () => {
+      it("should generate and verify valid signature", () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1922,11 +1961,11 @@ describe("bridge1024", () => {
 
         const keypair = generateECDSAKeypair();
         const signature = generateSignature(eventData, keypair.privateKey);
-        const isValid = verifySignature(eventData, signature, keypair.publicKey);
+        const isValid = verifySignature(eventData, signature, keypair.publicKeyPem);
         expect(isValid).to.be.true;
       });
 
-      it.skip("should reject invalid signature", () => {
+      it("should reject invalid signature", () => {
         const eventData: StakeEventData = {
           sourceContract: peerContract.publicKey,
           targetContract: receiverState,
@@ -1940,28 +1979,28 @@ describe("bridge1024", () => {
         const keypair1 = generateECDSAKeypair();
         const keypair2 = generateECDSAKeypair();
         const signature = generateSignature(eventData, keypair1.privateKey);
-        const isValid = verifySignature(eventData, signature, keypair2.publicKey);
+        const isValid = verifySignature(eventData, signature, keypair2.publicKeyPem);
         expect(isValid).to.be.false;
       });
     });
 
     describe("Threshold Calculation Test", () => {
-      it.skip("should calculate correct threshold for 3 relayers", () => {
+      it("should calculate correct threshold for 3 relayers", () => {
         const threshold = calculateThreshold(3);
         expect(threshold).to.equal(2);
       });
 
-      it.skip("should calculate correct threshold for 4 relayers", () => {
+      it("should calculate correct threshold for 4 relayers", () => {
         const threshold = calculateThreshold(4);
         expect(threshold).to.equal(3);
       });
 
-      it.skip("should calculate correct threshold for 5 relayers", () => {
+      it("should calculate correct threshold for 5 relayers", () => {
         const threshold = calculateThreshold(5);
         expect(threshold).to.equal(4);
       });
 
-      it.skip("should calculate correct threshold for 18 relayers", () => {
+      it("should calculate correct threshold for 18 relayers", () => {
         const threshold = calculateThreshold(18);
         expect(threshold).to.equal(13);
       });

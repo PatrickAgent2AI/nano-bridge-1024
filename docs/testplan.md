@@ -23,8 +23,8 @@
 | 统一合约 | EVM | 功能测试 | 3 (TC-001 ~ TC-003) | ⚪ 未开始 | 统一初始化、USDC配置、统一对端配置 |
 | 发送端合约 | SVM | 功能测试 | 5 (TC-004 ~ TC-008) | ✅ 测试代码已完成 | 质押功能、USDC验证、事件完整性 |
 | 发送端合约 | EVM | 功能测试 | 5 (TC-004 ~ TC-008) | ⚪ 未开始 | 质押功能、USDC验证、事件完整性 |
-| 接收端合约 | SVM | 功能测试 | 11 (TC-101 ~ TC-111) | ✅ 测试代码已完成 | 白名单管理、签名验证、nonce递增判断、CrossChainRequest PDA |
-| 接收端合约 | EVM | 功能测试 | 11 (TC-101 ~ TC-111) | ⚪ 未开始 | 白名单管理、签名验证、nonce递增判断 |
+| 接收端合约 | SVM | 功能测试 | 13 (TC-101 ~ TC-113) | ✅ 测试代码已完成 | 白名单管理、签名验证、nonce递增判断、CrossChainRequest PDA、流动性管理 |
+| 接收端合约 | EVM | 功能测试 | 13 (TC-101 ~ TC-113) | ⚪ 未开始 | 白名单管理、签名验证、nonce递增判断、流动性管理 |
 | Relayer服务 | - | 功能测试 | 8 (TC-201 ~ TC-208) | ⚪ 未开始 | 事件监听、签名生成、消息验证 |
 | 集成测试 | SVM | 端到端测试 | 4 (IT-001 ~ IT-004) | ✅ 测试代码已完成 | 跨链转账、并发、大额转账 |
 | 集成测试 | EVM | 端到端测试 | 4 (IT-001 ~ IT-004) | ⚪ 未开始 | 跨链转账、并发、大额转账 |
@@ -41,8 +41,8 @@
 | 统一合约测试 | EVM | TC-001 ~ TC-003 | 3 | 统一初始化、USDC配置、统一对端配置 | ⚪ 未开始 |
 | 发送端合约测试 | SVM | TC-004 ~ TC-008 | 5 | 质押功能、USDC验证、事件完整性 | ✅ 已完成 |
 | 发送端合约测试 | EVM | TC-004 ~ TC-008 | 5 | 质押功能、USDC验证、事件完整性 | ⚪ 未开始 |
-| 接收端合约测试 | SVM | TC-101 ~ TC-111 | 11 | 白名单管理、签名验证、nonce递增判断、CrossChainRequest PDA | ✅ 已完成 |
-| 接收端合约测试 | EVM | TC-101 ~ TC-111 | 11 | 白名单管理、签名验证、nonce递增判断 | ⚪ 未开始 |
+| 接收端合约测试 | SVM | TC-101 ~ TC-113 | 13 | 白名单管理、签名验证、nonce递增判断、CrossChainRequest PDA、流动性管理 | ✅ 已完成 |
+| 接收端合约测试 | EVM | TC-101 ~ TC-113 | 13 | 白名单管理、签名验证、nonce递增判断、流动性管理 | ⚪ 未开始 |
 | Relayer服务测试 | - | TC-201 ~ TC-208 | 8 | 事件监听、签名生成、多Relayer协同 | ⚪ 未开始 |
 | 集成测试 | SVM | IT-001 ~ IT-004 | 4 | 端到端跨链转账、并发、大额转账 | ✅ 已完成 |
 | 集成测试 | EVM | IT-001 ~ IT-004 | 4 | 端到端跨链转账、并发、大额转账 | ⚪ 未开始 |
@@ -1091,9 +1091,14 @@ interface StakeEventData {
 ### 统一初始化流程
 
 **SVM 平台：**
-1. 调用 `initialize(vaultAddress, adminAddress)` 同时初始化发送端和接收端合约
-2. 调用 `configure_usdc(usdcAddress)` 配置USDC代币地址（必须在stake和submit_signature之前配置）
-3. 调用 `configure_peer(peerContract, sourceChainId, targetChainId)` 统一配置对端合约和链ID
+1. 创建 Squad 多签账户作为 admin（外部处理，测试中可以使用普通Keypair模拟）
+2. 派生 PDA 金库地址（种子：`[b"vault"]`）
+3. 调用 `initialize()` 同时初始化发送端和接收端合约
+   - vault: PDA 金库地址
+   - admin: 多签钱包地址（测试中可以使用普通Keypair）
+4. 调用 `configure_usdc(usdcAddress)` 配置USDC代币地址（必须在stake和submit_signature之前配置）
+5. 调用 `configure_peer(peerContract, sourceChainId, targetChainId)` 统一配置对端合约和链ID
+6. （可选）调用 `addLiquidity(amount)` 向 PDA 金库增加流动性
 
 **EVM 平台：**
 1. 调用 `initialize(vaultAddress, adminAddress)` 初始化发送端和接收端合约
@@ -1104,8 +1109,9 @@ interface StakeEventData {
 
 ```typescript
 // 管理账户
-admin: Keypair           // 管理员账户
-vault: Keypair           // 金库账户
+admin: Keypair           // 多签钱包地址（合约层面视为普通地址）
+vault: PublicKey         // PDA金库地址（种子：[b"vault"]）
+vaultTokenAccount: PublicKey  // PDA金库token account（种子：[b"vault_token", usdc_mint]）
 
 // 用户账户
 user1, user2: Keypair    // 测试用户
@@ -1116,7 +1122,16 @@ nonRelayer: Keypair                    // 非白名单账户
 
 // 其他
 nonAdmin: Keypair        // 非管理员账户
+
+// Token账户
+user1TokenAccount: PublicKey  // 用户1的USDC token account
+adminTokenAccount: PublicKey  // 多签钱包的USDC token account
 ```
+
+**重要说明：**
+- **vault**: 使用 PDA，由程序控制，支持自动转账
+- **admin**: 多签钱包地址（如 Squad 多签），合约层面只验证签名，不关心多签逻辑
+- **Token账户**: 使用关联token账户（ATA），通过 `getAssociatedTokenAddress` 获取
 
 ### 测试配置参数
 
@@ -1377,8 +1392,8 @@ event StakeEvent(
 
 ```solidity
 // 管理账户
-address admin;           // 管理员账户
-address vault;           // 金库账户
+address admin;           // 管理员账户（可以是 Gnosis Safe 多签钱包）
+address vault;           // 金库账户（可以是 Gnosis Safe 多签钱包）
 
 // 用户账户
 address user1;           // 测试用户1
@@ -1393,6 +1408,11 @@ address nonRelayer;      // 非白名单账户
 // 其他
 address nonAdmin;        // 非管理员账户
 ```
+
+**多签钱包测试说明：**
+- `admin` 和 `vault` 可以是 Gnosis Safe 多签钱包地址
+- 在测试中，如果使用 Gnosis Safe 作为 vault，需要先执行 `usdc.approve(bridgeContract, type(uint256).max)` 授权合约
+- 测试时可以使用普通 EOA 地址或多签钱包地址，两者在合约层面没有区别
 
 ### 测试配置参数
 
@@ -1452,7 +1472,23 @@ function signEventData(
 function calculateThreshold(uint256 relayerCount) internal pure returns (uint256) {
     return (relayerCount * 2 + 2) / 3; // 向上取整
 }
+
+// 设置 ERC20 授权（用于多签钱包测试）
+function setupApproval(address token, address spender, address owner, uint256 amount) internal {
+    vm.prank(owner);
+    IERC20(token).approve(spender, amount);
+}
+
+// 设置无限授权（用于多签钱包测试）
+function setupInfiniteApproval(address token, address spender, address owner) internal {
+    setupApproval(token, spender, owner, type(uint256).max);
+}
 ```
+
+**多签钱包测试注意事项：**
+- 如果使用 Gnosis Safe 作为 vault，在测试 setUp 中需要先执行 `setupInfiniteApproval(usdc, bridgeContract, vault)`
+- 如果使用 Gnosis Safe 作为 admin，管理操作需要通过 Safe 的多签投票流程
+- 在测试中可以使用 `vm.prank` 模拟多签钱包地址调用合约
 
 ### 运行测试
 

@@ -127,6 +127,105 @@ function configure_usdc(
 - 如果未配置USDC地址，`stake` 和 `submit_signature` 函数会返回错误 "USDC address not configured"
 - 可以通过检查 `usdc_mint` 是否为无效地址（如 `Pubkey::default()` 或 `address(0)`）来判断是否已配置
 
+### 统一初始化 API（EVM）
+
+**重要变更：** 在 EVM 平台上，发送端和接收端合约的初始化合并为一个 `initialize` 指令。
+
+#### 统一初始化
+
+```
+function initialize(
+    address vaultAddress,      // 质押金库地址（发送端和接收端共享）
+    address adminAddress       // 管理员钱包地址（发送端和接收端共享）
+) onlyAdmin
+```
+
+**参数说明：**
+- `vaultAddress`：存储质押代币的金库地址（发送端和接收端共享同一个金库）
+  - **支持多签钱包**：可以是 Gnosis Safe 等多签钱包地址
+  - **合约透明性**：合约将其视为普通地址，不关心是否是多签
+  - **转账操作**：从用户地址转账到金库，从金库转账到接收地址
+- `adminAddress`：具有管理权限的钱包地址（发送端和接收端共享同一个管理员）
+  - **支持多签钱包**：可以是 Gnosis Safe 等多签钱包地址
+  - **合约透明性**：合约将其视为普通地址，不关心是否是多签
+  - **权限检查**：合约只验证 `msg.sender == adminAddress`，多签逻辑在外部处理
+
+**权限：** 仅管理员可调用（初始化时由部署者调用）
+
+**功能描述：**
+1. 同时创建 `SenderState` 和 `ReceiverState` 状态
+2. 初始化发送端 nonce 为 0
+3. 初始化接收端 lastNonce 为 0
+4. 设置共享的 vault 和 admin 地址
+
+**多签钱包支持：**
+- **完全兼容**：EVM 合约中的 `vault` 和 `admin` 地址**完全支持多签钱包**（如 Gnosis Safe）
+- **合约层面**：从合约的角度来看，多签钱包和普通 EOA（Externally Owned Account）没有区别
+- **权限检查**：合约只需要验证 `msg.sender == admin` 或 `msg.sender == vault`，不需要关心它们是否是多签
+- **多签逻辑外部化**：多签的投票、阈值检查等逻辑在外部处理（Gnosis Safe 合约），当多签通过后，会以多签钱包地址的身份调用我们的合约
+- **使用示例**：
+  ```solidity
+  // 初始化时，vault 和 admin 可以是多签钱包地址
+  initialize(
+      gnosisSafeVaultAddress,  // Gnosis Safe 多签钱包地址
+      gnosisSafeAdminAddress   // Gnosis Safe 多签钱包地址
+  );
+  
+  // 权限检查时，合约只验证地址，不关心是否是多签
+  modifier onlyAdmin() {
+      require(msg.sender == admin, "Only admin");
+      _;
+  }
+  
+  // 转账时，从金库（可能是多签钱包）转账
+  IERC20(usdcContract).transferFrom(vault, receiver, amount);
+  ```
+
+**优势：**
+- **向后兼容**：支持普通 EOA 和多签钱包，无需修改合约代码
+- **安全性提升**：管理员和金库可以使用多签钱包，提高资金和管理操作的安全性
+- **实现简洁**：合约保持简洁，无需处理多签提案机制
+- **灵活性**：部署时可以选择使用普通地址或多签地址，根据安全需求灵活配置
+
+#### 配置USDC代币地址（EVM）
+
+```
+function configure_usdc(
+    address usdcAddress        // USDC ERC20合约地址
+) onlyAdmin
+```
+
+**参数说明：**
+- `usdcAddress`：USDC ERC20合约地址
+
+**权限：** 仅管理员可调用（`msg.sender == admin`，admin 可以是多签钱包）
+
+**功能描述：**
+1. 同时配置发送端和接收端的 `usdcContract` 字段
+2. 必须在调用 `stake` 或 `submit_signature` 之前配置
+
+#### 统一对端配置（EVM）
+
+```
+function configure_peer(
+    address peerContract,      // 对端合约地址（发送端和接收端共享同一个对端）
+    uint256 sourceChainId,     // 自己的 chain id
+    uint256 targetChainId      // 对端的 chain id
+) onlyAdmin
+```
+
+**参数说明：**
+- `peerContract`：对端合约地址（发送端和接收端共享同一个对端）
+- `sourceChainId`：当前链的 chain id
+- `targetChainId`：对端链的 chain id
+
+**权限：** 仅管理员可调用（`msg.sender == admin`，admin 可以是多签钱包）
+
+**功能描述：**
+1. 同时配置发送端的 `targetContract`、`sourceChainId`、`targetChainId`
+2. 同时配置接收端的 `sourceContract`、`sourceChainId`、`targetChainId`
+3. 因为对端是同一个，所以两个配置共享相同的参数
+
 #### 统一对端配置
 
 ```
