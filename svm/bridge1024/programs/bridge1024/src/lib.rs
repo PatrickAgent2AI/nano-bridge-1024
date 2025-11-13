@@ -316,12 +316,12 @@ fn verify_ed25519_signature(
     };
     
     // Ed25519Program ID: Ed25519SigVerify111111111111111111111111111
-    // Base58 decoded bytes for "Ed25519SigVerify111111111111111111111111111"
+    // Correct bytes for Ed25519Program.programId
     let ed25519_program_id = Pubkey::new_from_array([
-        237, 35, 80, 224, 127, 71, 23, 100,
-        101, 66, 55, 7, 18, 191, 241, 98,
-        137, 14, 193, 135, 218, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 1
+        3, 125, 70, 214, 124, 147, 251, 190,
+        18, 249, 66, 143, 131, 141, 64, 255,
+        5, 112, 116, 73, 39, 244, 138, 100,
+        252, 202, 112, 68, 128, 0, 0, 0
     ]);
     
     // Ed25519 signature must be exactly 64 bytes

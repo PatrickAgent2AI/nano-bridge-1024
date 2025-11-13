@@ -32,7 +32,6 @@ contract Bridge1024 {
         uint64 targetChainId;
         address[] relayers;
         uint64 lastNonce;
-        mapping(address => bytes) relayerEcdsaPubkeys; // Maps relayer address to ECDSA public key
     }
     
     struct StakeEventData {
@@ -241,9 +240,8 @@ contract Bridge1024 {
     /**
      * @notice Add a relayer to whitelist
      * @param relayerAddress Relayer address
-     * @param ecdsaPubkey ECDSA public key (65 bytes uncompressed format)
      */
-    function addRelayer(address relayerAddress, bytes memory ecdsaPubkey) external onlyAdmin {
+    function addRelayer(address relayerAddress) external onlyAdmin {
         // Check if relayer already exists
         for (uint i = 0; i < receiverStateInternal.relayers.length; i++) {
             if (receiverStateInternal.relayers[i] == relayerAddress) revert RelayerAlreadyExists();
@@ -252,9 +250,8 @@ contract Bridge1024 {
         // Check max relayers limit
         if (receiverStateInternal.relayers.length >= MAX_RELAYERS) revert TooManyRelayers();
         
-        // Add relayer and ECDSA public key
+        // Add relayer
         receiverStateInternal.relayers.push(relayerAddress);
-        receiverStateInternal.relayerEcdsaPubkeys[relayerAddress] = ecdsaPubkey;
         receiverStateInternal.relayerCount++;
         
         emit RelayerAdded(relayerAddress);
@@ -281,7 +278,6 @@ contract Bridge1024 {
         // Remove relayer
         receiverStateInternal.relayers[index] = receiverStateInternal.relayers[receiverStateInternal.relayers.length - 1];
         receiverStateInternal.relayers.pop();
-        delete receiverStateInternal.relayerEcdsaPubkeys[relayerAddress];
         receiverStateInternal.relayerCount--;
         
         emit RelayerRemoved(relayerAddress);
