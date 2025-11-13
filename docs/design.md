@@ -3,6 +3,7 @@
 ## 目录
 
 - [系统架构](#系统架构)
+- [密码学算法设计](#密码学算法设计)
 - [数据存储设计](#数据存储设计)
 - [SVM 合约设计](#svm-合约设计)
 - [EVM 合约设计](#evm-合约设计)
@@ -44,6 +45,124 @@
 - 程序地址：`SMPLecH534NA9acB4bMolv7X6RBpK4rjn3LkN1gZXYjy`
 - 用于管理操作的多签钱包创建和管理
 - 多签投票在外部处理，合约不关心多签逻辑
+
+---
+
+## 密码学算法设计
+
+### 设计原则
+
+**关键设计决策**：SVM 和 EVM 各自使用其原生的密码学算法，以最大化安全性和性能。
+
+### SVM 端（Solana/1024chain）
+
+**签名算法**：Ed25519（Solana 原生）
+- 使用 Solana 的 Ed25519Program 预编译合约进行签名验证
+- 程序 ID：`Ed25519SigVerify111111111111111111111111111`
+- 签名长度：64 字节
+- 公钥长度：32 字节
+
+**数据序列化**：Borsh（Solana 原生）
+- 使用 Anchor 框架的 Borsh 编码
+- 直接序列化 `StakeEventData` 结构体
+- 确保字节级别的一致性
+
+**哈希算法**：无需额外哈希
+- Ed25519 签名直接对序列化后的数据进行
+- 签名本身已包含消息完整性验证
+
+**验证流程**：
+1. 客户端使用 `Ed25519Program.createInstructionWithPublicKey()` 创建签名验证指令
+2. Solana 运行时在交易执行前验证签名
+3. 合约通过 Instructions Sysvar 检查 Ed25519Program 指令的存在和正确性
+4. 验证参数匹配：签名、公钥、消息内容
+
+### EVM 端（Ethereum/Arbitrum）
+
+**签名算法**：ECDSA (secp256k1)（Ethereum 原生）
+- 使用 `ecrecover` 预编译合约进行签名验证
+- 签名长度：65 字节 (r: 32, s: 32, v: 1)
+- 曲线：secp256k1（与比特币、以太坊相同）
+
+**数据序列化**：JSON 字符串格式
+- 将事件数据序列化为 JSON 字符串
+- 格式：`{"sourceContract":"...","targetContract":"...","chainId":"...","blockHeight":"...","amount":"...","receiverAddress":"...","nonce":"..."}`
+- 确保跨语言的可读性和一致性
+
+**哈希算法**：两层哈希
+1. **第一层 - SHA-256**：对 JSON 序列化的事件数据进行哈希
+   ```solidity
+   bytes32 dataHash = sha256(jsonString);
+   ```
+2. **第二层 - Keccak256 (EIP-191)**：应用 EIP-191 签名消息格式
+   ```solidity
+   bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", dataHash));
+   ```
+
+**验证流程**：
+1. 对事件数据进行 JSON 序列化
+2. 计算 SHA-256 哈希
+3. 应用 EIP-191 前缀并计算 Keccak256 哈希
+4. 使用 `ecrecover` 从签名中恢复签名者地址
+5. 验证恢复的地址与预期的 Relayer 地址匹配
+
+### Relayer 签名职责
+
+由于两条链使用不同的密码学算法，Relayer 需要根据目标链选择相应的签名方式：
+
+#### 监听 SVM 事件 → 提交到 EVM
+
+1. 监听 SVM 链的 `StakeEvent` 事件
+2. 获取事件数据（Borsh 格式）
+3. **转换为 EVM 格式**：
+   - 将事件数据序列化为 JSON 字符串
+   - 计算 SHA-256 哈希
+   - 应用 EIP-191 格式
+4. **使用 ECDSA (secp256k1) 私钥签名**
+5. 提交签名到 EVM 接收端合约
+
+#### 监听 EVM 事件 → 提交到 SVM
+
+1. 监听 EVM 链的 `StakeEvent` 事件
+2. 获取事件数据（EVM event logs）
+3. **转换为 SVM 格式**：
+   - 构造 `StakeEventData` 结构体
+   - 使用 Borsh 序列化
+4. **使用 Ed25519 私钥签名**
+5. 创建 `Ed25519Program` 验证指令
+6. 提交签名到 SVM 接收端合约
+
+### 密码学算法对比
+
+| 特性 | SVM (Solana) | EVM (Ethereum) |
+|------|--------------|----------------|
+| **签名算法** | Ed25519 | ECDSA (secp256k1) |
+| **签名长度** | 64 字节 | 65 字节 |
+| **公钥长度** | 32 字节 | 20 字节（地址） |
+| **数据序列化** | Borsh（二进制） | JSON（字符串） |
+| **哈希算法** | 无需额外哈希 | SHA-256 + Keccak256 |
+| **签名格式** | 标准 Ed25519 | EIP-191 |
+| **验证方式** | Ed25519Program | ecrecover |
+| **性能** | 极快（原生支持） | 快（预编译） |
+| **安全级别** | 128 位（Ed25519） | 128 位（secp256k1） |
+
+### 为什么使用各自原生算法？
+
+1. **性能最优**：使用链的原生算法可以充分利用预编译合约，获得最佳性能
+2. **安全性最高**：经过充分测试和审计的原生实现，安全性最可靠
+3. **Gas 成本最低**：原生算法的 Gas 消耗最少
+4. **生态兼容性**：与各链生态的标准工具和钱包完全兼容
+5. **简化实现**：无需在合约中实现复杂的密码学库
+
+### 跨链兼容性保证
+
+虽然两条链使用不同的签名算法，但通过以下机制保证跨链兼容性：
+
+1. **事件数据结构统一**：两条链使用相同的 `StakeEventData` 结构
+2. **Relayer 转换层**：Relayer 负责在两种格式之间转换
+3. **独立验证**：每条链独立验证其原生格式的签名
+4. **Nonce 机制统一**：两条链使用相同的 nonce 递增判断机制防重放
+5. **阈值计算统一**：两条链使用相同的 2/3 阈值计算公式
 
 ---
 
@@ -245,10 +364,16 @@ pub struct ReceiverState {
      - 如果 `new_nonce == 0`（溢出），重置为 0
      - 更新 `sender_state.nonce = new_nonce`
 
-5. **add_relayer** / **remove_relayer** / **is_relayer** (接收端): Relayer 白名单管理
+5. **add_relayer** / **remove_relayer** (接收端): Relayer 白名单管理
+   - **重要变更**: 移除了`ecdsa_pubkey`参数，直接使用relayer的Solana公钥（Ed25519）
+   - `add_relayer(relayer: Pubkey)` - 只需要relayer地址
+   - Relayer的Solana密钥就是Ed25519密钥，无需额外存储
 
 6. **submit_signature** (接收端): 提交签名并检查阈值
    - **验证USDC地址已配置**：如果 `receiver_state.usdc_mint` 为无效地址（如 `Pubkey::default()`），返回错误
+   - **Ed25519签名验证**：使用Solana的Ed25519Program进行真实的密码学验证
+   - 客户端必须在交易中包含`Ed25519Program.createInstructionWithPublicKey()`指令
+   - 合约检查Instructions Sysvar，确认Ed25519Program验证通过
    - 解锁操作使用 PDA 金库作为 authority，自动执行转账
 
 7. **add_liquidity** (接收端): 增加流动性
@@ -273,15 +398,43 @@ pub struct ReceiverState {
    - 如果 nonce > last_nonce，继续处理
 5. 获取或创建 CrossChainRequest PDA 账户
 6. 检查该 relayer 是否已为此 nonce 签名
-7. 记录签名到 CrossChainRequest.signed_relayers
-8. 计算签名数量，检查是否达到阈值（> 2/3 relayer_count）
-9. 如果达到阈值：
+7. **验证Ed25519签名**（真实密码学验证）：
+   - 从Instructions Sysvar加载当前指令之前的所有指令
+   - 查找Ed25519Program指令（程序ID: Ed25519SigVerify111111111111111111111111111）
+   - 验证Ed25519Program指令中的签名、公钥、消息与我们的参数匹配
+   - 如果找到匹配的Ed25519Program指令，说明签名已被密码学验证
+   - 如果没有找到或不匹配，拒绝签名
+8. 记录签名到 CrossChainRequest.signed_relayers
+9. 计算签名数量，检查是否达到阈值（> 2/3 relayer_count）
+10. 如果达到阈值：
    - 从 PDA 金库转账到接收地址（使用配置的 usdc_mint）
    - 使用 PDA 作为 authority，无需外部签名
    - 更新 last_nonce = nonce（标记为已使用）
    - 标记 CrossChainRequest.is_unlocked = true
    - 可选：关闭 CrossChainRequest 账户回收租金
 ```
+
+#### Ed25519签名验证详解
+
+**为什么使用Ed25519Program？**
+- Solana BPF程序无法直接使用ed25519-dalek等库（需要std或getrandom）
+- Ed25519Program是Solana原生预编译合约，提供高效的Ed25519验证
+- 程序ID: `Ed25519SigVerify111111111111111111111111111`
+
+**工作原理：**
+1. 客户端创建两个指令：
+   - `Ed25519Program.createInstructionWithPublicKey()` - 执行密码学验证
+   - `submit_signature()` - 执行业务逻辑
+2. Ed25519Program在交易执行前先验证签名
+3. 我们的合约通过Instructions Sysvar检查Ed25519Program指令
+4. 验证指令中的参数（签名、公钥、消息）与我们的匹配
+5. 如果交易成功执行到这里，说明签名验证通过
+
+**安全性：**
+- ✅ 真实的密码学验证，无法伪造签名
+- ✅ 与Solana交易签名相同的安全级别
+- ✅ 防止恶意relayer提交虚假签名
+- ✅ 结合白名单+2/3阈值提供多层保护
 
 #### Nonce 溢出处理
 
@@ -392,25 +545,144 @@ struct ReceiverState {
 
 ### 功能模块
 
-1. **事件监听模块**
-   - 监听 EVM 链的 `StakeEvent` 事件
-   - 监听 SVM 链的 `StakeEvent` 事件
+#### 1. 事件监听模块
 
-2. **签名模块**
-   - 使用 ECDSA (secp256k1) 对事件数据进行签名
-   - 签名数据：`SHA256(serialize(eventData))`
+**EVM 事件监听**：
+- 监听 EVM 链（Arbitrum）的 `StakeEvent` 事件
+- 使用 Web3.js 或 Ethers.js 连接到 EVM RPC
+- 解析事件日志获取 `StakeEventData`
 
-3. **交易提交模块**
-   - 提交签名到接收端合约
-   - 处理交易失败和重试
+**SVM 事件监听**：
+- 监听 SVM 链（Solana/1024chain）的 `StakeEvent` 事件
+- 使用 Solana Web3.js 连接到 SVM RPC
+- 解析 Anchor 事件获取 `StakeEventData`
+
+#### 2. 签名模块（双算法支持）
+
+Relayer 需要同时支持两种签名算法，根据目标链选择：
+
+**Ed25519 签名（用于提交到 SVM）**：
+- 算法：Ed25519（Solana 原生）
+- 数据格式：Borsh 序列化的 `StakeEventData`
+- 签名库：`@noble/ed25519` 或 `tweetnacl`
+- 密钥对：Solana Keypair (32 字节私钥)
+- 输出：64 字节签名 + `Ed25519Program` 指令
+
+**ECDSA 签名（用于提交到 EVM）**：
+- 算法：ECDSA (secp256k1)（Ethereum 原生）
+- 数据格式：JSON 序列化 → SHA-256 → EIP-191 格式
+- 签名库：`ethers.js` 或 `web3.js`
+- 密钥对：Ethereum 私钥 (32 字节)
+- 输出：65 字节签名 (r, s, v)
+
+#### 3. 数据转换模块
+
+**SVM → EVM 转换**：
+```typescript
+// 1. 从 SVM 事件获取数据（Borsh 格式）
+const svmEventData = parseAnchorEvent(event);
+
+// 2. 转换为 EVM 格式
+const evmEventData = {
+  sourceContract: svmEventData.sourceContract.toBase58(), // 转换为字符串
+  targetContract: evmEventData.targetContract, // EVM 地址
+  chainId: svmEventData.sourceChainId.toString(),
+  blockHeight: svmEventData.blockHeight.toString(),
+  amount: svmEventData.amount.toString(),
+  receiverAddress: svmEventData.receiverAddress,
+  nonce: svmEventData.nonce.toString()
+};
+
+// 3. JSON 序列化
+const jsonString = JSON.stringify(evmEventData);
+
+// 4. 计算哈希（SHA-256 + EIP-191）
+const sha256Hash = createHash('sha256').update(jsonString).digest();
+const ethSignedHash = keccak256(
+  Buffer.concat([
+    Buffer.from('\x19Ethereum Signed Message:\n32'),
+    sha256Hash
+  ])
+);
+
+// 5. 使用 ECDSA 私钥签名
+const signature = await ecdsaWallet.signMessage(ethSignedHash);
+```
+
+**EVM → SVM 转换**：
+```typescript
+// 1. 从 EVM 事件获取数据
+const evmEvent = parseEthereumEvent(log);
+
+// 2. 转换为 SVM 格式（构造 Anchor 类型）
+const svmEventData: StakeEventData = {
+  sourceContract: new PublicKey(evmEvent.sourceContract),
+  targetContract: new PublicKey(svmEvent.targetContract),
+  sourceChainId: new BN(evmEvent.chainId),
+  targetChainId: new BN(evmEvent.targetChainId),
+  blockHeight: new BN(evmEvent.blockHeight),
+  amount: new BN(evmEvent.amount),
+  receiverAddress: evmEvent.receiverAddress,
+  nonce: new BN(evmEvent.nonce)
+};
+
+// 3. Borsh 序列化
+const message = program.coder.types.encode("StakeEventData", svmEventData);
+
+// 4. 使用 Ed25519 私钥签名
+const signature = await ed25519.sign(message, keypair.secretKey.slice(0, 32));
+
+// 5. 创建 Ed25519Program 验证指令
+const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
+  publicKey: keypair.publicKey.toBytes(),
+  message: message,
+  signature: signature
+});
+```
+
+#### 4. 交易提交模块
+
+**提交到 EVM**：
+- 构造 `submitSignature` 交易
+- 使用 Ethers.js 发送交易
+- 处理 Gas 估算和失败重试
+- 监控交易确认状态
+
+**提交到 SVM**：
+- 构造交易包含两个指令：
+  1. `Ed25519Program` 验证指令
+  2. `submitSignature` 业务指令
+- 使用 Solana Web3.js 发送交易
+- 处理计算单元和失败重试
+- 监控交易确认状态
+
+### Relayer 密钥管理
+
+每个 Relayer 需要维护两对密钥：
+
+**Ed25519 密钥对（用于 SVM）**：
+```typescript
+// Solana Keypair
+const svmKeypair = Keypair.generate();
+// 或从现有密钥恢复
+const svmKeypair = Keypair.fromSecretKey(secretKey);
+```
+
+**ECDSA 密钥对（用于 EVM）**：
+```typescript
+// Ethereum Wallet
+const evmWallet = new ethers.Wallet(privateKey);
+// 或生成新钱包
+const evmWallet = ethers.Wallet.createRandom();
+```
 
 ### 配置要求
 
 - 支持最多 18 个 relayer
-- 每个 relayer 独立运行
+- 每个 relayer 独立运行，维护双密钥对（Ed25519 + ECDSA）
 - 阈值：`Math.ceil(relayer_count * 2 / 3)`
-- 支持至少 100 个未完成的跨链请求（每个请求独立 PDA 账户）
-- 支持至少 1200 个签名缓存（100 个请求 × 18 个 relayer = 1800 个签名）
+- 支持至少 100 个未完成的跨链请求
+- 支持至少 1200 个签名缓存
 
 ---
 
@@ -532,4 +804,5 @@ await program.methods
 | 2025-11-15 | 重构设计：支持 18 个 relayer；nonce 使用递增判断机制；统一初始化函数；支持 100+ 未完成请求和 1200+ 签名缓存 |
 | 2025-11-15 | **多签钱包集成**：管理接口使用多签钱包（Squad），合约层面不关心多签逻辑；金库使用 PDA 支持自动转账；新增流动性管理接口（add_liquidity, withdraw_liquidity） |
 | 2025-11-15 | 整合 Squad 多签文档内容到设计文档和 API 文档，删除独立的 squad_multisig.md 文档 |
+| 2025-11-15 | **密码学算法设计**：明确 SVM 使用 Ed25519（原生），EVM 使用 ECDSA (secp256k1) + EIP-191（原生）；Relayer 负责格式转换；最大化性能和安全性 |
 

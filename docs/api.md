@@ -506,39 +506,115 @@ await program.methods
 
 ### 监听功能
 
-Relayer 需要监听发送端链的质押事件：
+Relayer 需要监听两条链的质押事件：
 
-```
-监听事件: StakeEvent
-来源: 发送端合约
-```
+**监听 SVM 事件**：
+```typescript
+// 连接到 SVM RPC
+const connection = new Connection(SVM_RPC_URL);
 
-**监听逻辑：**
-- 连接到发送端链的 RPC 节点
-- 订阅发送端合约的 `StakeEvent` 事件
-- 获取事件的完整数据
-
-### 签名转发功能
-
-```
-function processEvent(eventData: StakeEventData)
+// 监听 Anchor 事件
+program.addEventListener("StakeEvent", (event, slot) => {
+  processSvmEvent(event);
+});
 ```
 
-**处理流程：**
-1. 接收到 `StakeEvent` 事件数据
-2. **验证消息正确性：**
-   - 验证来自正确的发送端合约地址
-   - 验证 chain id 正确
-   - 验证 nonce 未被使用
-3. 对事件数据进行 hash 计算
-4. 使用 relayer 的私钥对 hash 进行签名
-5. 调用接收端合约的 `submitSignature` 接口
-6. 传入事件数据和签名
+**监听 EVM 事件**：
+```typescript
+// 连接到 EVM RPC
+const provider = new ethers.providers.JsonRpcProvider(EVM_RPC_URL);
 
-**验证规则：**
+// 监听合约事件
+bridgeContract.on("StakeEvent", (sourceContract, targetContract, chainId, 
+                                  blockHeight, amount, receiverAddress, nonce) => {
+  processEvmEvent(...);
+});
+```
+
+### 签名转发功能（双算法支持）
+
+#### 处理 SVM 事件 → 提交到 EVM
+
+```typescript
+async function processSvmEvent(eventData: StakeEventData) {
+  // 1. 验证事件
+  if (!verifyEventSource(eventData)) return;
+  
+  // 2. 转换为 EVM 格式（JSON 序列化）
+  const jsonData = {
+    sourceContract: eventData.sourceContract.toBase58(),
+    targetContract: eventData.targetContract.toBase58(),
+    chainId: eventData.sourceChainId.toString(),
+    blockHeight: eventData.blockHeight.toString(),
+    amount: eventData.amount.toString(),
+    receiverAddress: eventData.receiverAddress,
+    nonce: eventData.nonce.toString()
+  };
+  const jsonString = JSON.stringify(jsonData);
+  
+  // 3. 计算哈希（SHA-256 + EIP-191）
+  const sha256Hash = crypto.createHash('sha256').update(jsonString).digest();
+  const ethSignedHash = ethers.utils.keccak256(
+    ethers.utils.concat([
+      ethers.utils.toUtf8Bytes('\x19Ethereum Signed Message:\n32'),
+      sha256Hash
+    ])
+  );
+  
+  // 4. ECDSA 签名
+  const signature = await ecdsaWallet.signMessage(ethers.utils.arrayify(ethSignedHash));
+  
+  // 5. 提交到 EVM 接收端合约
+  await evmBridgeContract.submitSignature(eventData, signature);
+}
+```
+
+#### 处理 EVM 事件 → 提交到 SVM
+
+```typescript
+async function processEvmEvent(eventData: EvmStakeEventData) {
+  // 1. 验证事件
+  if (!verifyEventSource(eventData)) return;
+  
+  // 2. 转换为 SVM 格式（Borsh 序列化）
+  const svmEventData: StakeEventData = {
+    sourceContract: new PublicKey(eventData.sourceContract),
+    targetContract: new PublicKey(eventData.targetContract),
+    sourceChainId: new BN(eventData.chainId),
+    targetChainId: new BN(eventData.targetChainId),
+    blockHeight: new BN(eventData.blockHeight),
+    amount: new BN(eventData.amount),
+    receiverAddress: eventData.receiverAddress,
+    nonce: new BN(eventData.nonce)
+  };
+  
+  // 3. Borsh 序列化
+  const message = program.coder.types.encode("StakeEventData", svmEventData);
+  
+  // 4. Ed25519 签名
+  const signature = await ed25519.sign(message, keypair.secretKey.slice(0, 32));
+  
+  // 5. 创建 Ed25519Program 验证指令
+  const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
+    publicKey: keypair.publicKey.toBytes(),
+    message: message,
+    signature: signature
+  });
+  
+  // 6. 提交到 SVM 接收端合约（包含 Ed25519 验证指令）
+  const tx = await program.methods
+    .submitSignature(svmEventData.nonce, svmEventData, Array.from(signature))
+    .preInstructions([ed25519Ix]) // 先验证签名
+    .rpc();
+}
+```
+
+### 验证规则
+
+通用验证（两条链相同）：
 - `sourceContract`：必须匹配配置中的发送端合约地址
 - `chainId`：必须匹配配置中的发送端链 ID
-- `nonce`：检查本地缓存，确保 nonce 大于已处理的最大 nonce（可选，接收端合约也会通过递增判断验证）
+- `nonce`：检查本地缓存，确保 nonce 递增（可选，接收端合约也会验证）
 
 ---
 
@@ -634,28 +710,61 @@ pub struct CrossChainRequest {
 - 固定大小，易于管理
 - 解锁后可以关闭账户回收租金
 
-### 质押事件 Hash 计算
+### 密码学算法说明
 
-```
-hash = keccak256(abi.encodePacked(
-    sourceContract,
-    targetContract,
-    chainId,
-    blockHeight,
-    amount,
-    receiverAddress,
-    nonce
-))
+系统采用**各自原生密码学算法**的设计原则，最大化安全性和性能：
+
+#### SVM 端（Solana/1024chain）
+
+**签名算法**：Ed25519（Solana 原生）
+
+```typescript
+// 1. Borsh 序列化事件数据
+const message = program.coder.types.encode("StakeEventData", eventData);
+
+// 2. Ed25519 签名
+const signature = await ed25519.sign(message, keypair.secretKey.slice(0, 32));
+
+// 3. 验证（通过 Ed25519Program）
+const ed25519Ix = Ed25519Program.createInstructionWithPublicKey({
+  publicKey: keypair.publicKey.toBytes(),
+  message: message,
+  signature: signature
+});
 ```
 
-### 签名验证
+**特点**：
+- 签名长度：64 字节
+- 公钥长度：32 字节
+- 无需额外哈希（Ed25519 内置）
+- 使用 Solana Ed25519Program 预编译合约验证
 
-使用标准的 ECDSA 签名验证：
+#### EVM 端（Ethereum/Arbitrum）
 
+**签名算法**：ECDSA (secp256k1) + EIP-191
+
+```solidity
+// 1. JSON 序列化
+string memory json = serializeToJSON(eventData);
+
+// 2. SHA-256 哈希
+bytes32 sha256Hash = sha256(bytes(json));
+
+// 3. EIP-191 格式
+bytes32 ethSignedHash = keccak256(
+    abi.encodePacked("\x19Ethereum Signed Message:\n32", sha256Hash)
+);
+
+// 4. ECDSA 验证
+address recovered = ecrecover(ethSignedHash, v, r, s);
+require(recovered == expectedSigner, "Invalid signature");
 ```
-recoveredAddress = ecrecover(hash, signature)
-require(isRelayer(recoveredAddress), "Invalid signature")
-```
+
+**特点**：
+- 签名长度：65 字节 (r: 32, s: 32, v: 1)
+- 地址长度：20 字节
+- 两层哈希：SHA-256 + Keccak256 (EIP-191)
+- 使用 ecrecover 预编译合约验证
 
 ---
 

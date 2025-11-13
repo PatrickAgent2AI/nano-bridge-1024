@@ -1,0 +1,518 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+/**
+ * @title Bridge1024
+ * @notice Cross-chain bridge between EVM and SVM (1024chain)
+ * @dev Implements stake-unlock mechanism with multi-signature verification
+ */
+contract Bridge1024 {
+    
+    // ============ State Variables ============
+    
+    struct SenderState {
+        address vault;
+        address admin;
+        address usdcContract;
+        uint64 nonce;
+        address targetContract;
+        uint64 sourceChainId;
+        uint64 targetChainId;
+    }
+    
+    struct ReceiverState {
+        address vault;
+        address admin;
+        address usdcContract;
+        uint64 relayerCount;
+        address sourceContract;
+        uint64 sourceChainId;
+        uint64 targetChainId;
+        address[] relayers;
+        uint64 lastNonce;
+        mapping(address => bytes) relayerEcdsaPubkeys; // Maps relayer address to ECDSA public key
+    }
+    
+    struct StakeEventData {
+        address sourceContract;
+        address targetContract;
+        uint64 sourceChainId;
+        uint64 targetChainId;
+        uint64 blockHeight;
+        uint64 amount;
+        string receiverAddress;
+        uint64 nonce;
+    }
+    
+    struct NonceSignature {
+        mapping(address => bool) signedRelayers;
+        uint8 signatureCount;
+        bool isUnlocked;
+        StakeEventData eventData;
+    }
+    
+    SenderState public senderState;
+    ReceiverState private receiverStateInternal;
+    
+    mapping(uint64 => NonceSignature) public nonceSignatures;
+    
+    // Getter functions for receiver state (because of nested mapping)
+    function receiverState() external view returns (
+        address vault,
+        address admin,
+        address usdcContract,
+        uint64 relayerCount,
+        address sourceContract,
+        uint64 sourceChainId,
+        uint64 targetChainId,
+        uint64 lastNonce
+    ) {
+        return (
+            receiverStateInternal.vault,
+            receiverStateInternal.admin,
+            receiverStateInternal.usdcContract,
+            receiverStateInternal.relayerCount,
+            receiverStateInternal.sourceContract,
+            receiverStateInternal.sourceChainId,
+            receiverStateInternal.targetChainId,
+            receiverStateInternal.lastNonce
+        );
+    }
+    
+    function getRelayers() external view returns (address[] memory) {
+        return receiverStateInternal.relayers;
+    }
+    
+    uint256 public constant MAX_RELAYERS = 18;
+    
+    // ============ Events ============
+    
+    event StakeEvent(
+        address indexed sourceContract,
+        address indexed targetContract,
+        uint64 chainId,
+        uint64 blockHeight,
+        uint64 amount,
+        string receiverAddress,
+        uint64 nonce
+    );
+    
+    event RelayerAdded(address indexed relayer);
+    event RelayerRemoved(address indexed relayer);
+    event SignatureSubmitted(address indexed relayer, uint64 indexed nonce);
+    event TokensUnlocked(uint64 indexed nonce, address receiver, uint64 amount);
+    
+    // ============ Errors ============
+    
+    error Unauthorized();
+    error UsdcNotConfigured();
+    error InsufficientBalance();
+    error RelayerAlreadyExists();
+    error RelayerNotFound();
+    error InvalidNonce();
+    error InvalidSignature();
+    error InvalidSourceContract();
+    error InvalidChainId();
+    error TooManyRelayers();
+    error RelayerAlreadySigned();
+    error AlreadyInitialized();
+    
+    // ============ Modifiers ============
+    
+    modifier onlyAdmin() {
+        if (msg.sender != senderState.admin) revert Unauthorized();
+        _;
+    }
+    
+    modifier onlyWhitelistedRelayer() {
+        bool isWhitelisted = false;
+        for (uint i = 0; i < receiverStateInternal.relayers.length; i++) {
+            if (receiverStateInternal.relayers[i] == msg.sender) {
+                isWhitelisted = true;
+                break;
+            }
+        }
+        if (!isWhitelisted) revert Unauthorized();
+        _;
+    }
+    
+    // ============ Initialization Functions ============
+    
+    /**
+     * @notice Initialize both sender and receiver contracts
+     * @param vaultAddress Vault address for storing staked tokens
+     * @param adminAddress Admin address for management operations
+     */
+    function initialize(address vaultAddress, address adminAddress) external {
+        if (senderState.admin != address(0)) revert AlreadyInitialized();
+        
+        // Initialize sender state
+        senderState.vault = vaultAddress;
+        senderState.admin = adminAddress;
+        senderState.nonce = 0;
+        senderState.usdcContract = address(0);
+        senderState.targetContract = address(0);
+        senderState.sourceChainId = 0;
+        senderState.targetChainId = 0;
+        
+        // Initialize receiver state
+        receiverStateInternal.vault = vaultAddress;
+        receiverStateInternal.admin = adminAddress;
+        receiverStateInternal.lastNonce = 0;
+        receiverStateInternal.relayerCount = 0;
+        receiverStateInternal.usdcContract = address(0);
+        receiverStateInternal.sourceContract = address(0);
+        receiverStateInternal.sourceChainId = 0;
+        receiverStateInternal.targetChainId = 0;
+    }
+    
+    /**
+     * @notice Configure USDC token address
+     * @param usdcAddress USDC ERC20 contract address
+     */
+    function configureUsdc(address usdcAddress) external onlyAdmin {
+        senderState.usdcContract = usdcAddress;
+        receiverStateInternal.usdcContract = usdcAddress;
+    }
+    
+    /**
+     * @notice Configure peer contract and chain IDs
+     * @param peerContract Peer contract address on the other chain
+     * @param sourceChainId Current chain ID
+     * @param targetChainId Target chain ID
+     */
+    function configurePeer(
+        address peerContract,
+        uint64 sourceChainId,
+        uint64 targetChainId
+    ) external onlyAdmin {
+        // Configure sender state
+        senderState.targetContract = peerContract;
+        senderState.sourceChainId = sourceChainId;
+        senderState.targetChainId = targetChainId;
+        
+        // Configure receiver state
+        receiverStateInternal.sourceContract = peerContract;
+        receiverStateInternal.sourceChainId = sourceChainId;
+        receiverStateInternal.targetChainId = targetChainId;
+    }
+    
+    // ============ Sender Functions ============
+    
+    /**
+     * @notice Stake USDC tokens to initiate cross-chain transfer
+     * @param amount Amount of USDC to stake
+     * @param receiverAddress Receiver address on target chain
+     * @return nonce The nonce for this stake transaction
+     */
+    function stake(uint64 amount, string memory receiverAddress) external returns (uint64) {
+        if (senderState.usdcContract == address(0)) revert UsdcNotConfigured();
+        
+        // Transfer tokens from user to vault
+        IERC20 usdc = IERC20(senderState.usdcContract);
+        require(usdc.transferFrom(msg.sender, senderState.vault, amount), "Transfer failed");
+        
+        // Update nonce
+        uint64 currentNonce = senderState.nonce;
+        uint64 newNonce = currentNonce + 1;
+        if (newNonce == 0 && currentNonce != type(uint64).max) {
+            revert InvalidNonce();
+        }
+        senderState.nonce = newNonce;
+        
+        // Emit stake event
+        emit StakeEvent(
+            address(this),
+            senderState.targetContract,
+            senderState.sourceChainId,
+            uint64(block.number),
+            amount,
+            receiverAddress,
+            newNonce
+        );
+        
+        return newNonce;
+    }
+    
+    // ============ Receiver Functions ============
+    
+    /**
+     * @notice Add a relayer to whitelist
+     * @param relayerAddress Relayer address
+     * @param ecdsaPubkey ECDSA public key (65 bytes uncompressed format)
+     */
+    function addRelayer(address relayerAddress, bytes memory ecdsaPubkey) external onlyAdmin {
+        // Check if relayer already exists
+        for (uint i = 0; i < receiverStateInternal.relayers.length; i++) {
+            if (receiverStateInternal.relayers[i] == relayerAddress) revert RelayerAlreadyExists();
+        }
+        
+        // Check max relayers limit
+        if (receiverStateInternal.relayers.length >= MAX_RELAYERS) revert TooManyRelayers();
+        
+        // Add relayer and ECDSA public key
+        receiverStateInternal.relayers.push(relayerAddress);
+        receiverStateInternal.relayerEcdsaPubkeys[relayerAddress] = ecdsaPubkey;
+        receiverStateInternal.relayerCount++;
+        
+        emit RelayerAdded(relayerAddress);
+    }
+    
+    /**
+     * @notice Remove a relayer from whitelist
+     * @param relayerAddress Relayer address to remove
+     */
+    function removeRelayer(address relayerAddress) external onlyAdmin {
+        bool found = false;
+        uint256 index = 0;
+        
+        for (uint i = 0; i < receiverStateInternal.relayers.length; i++) {
+            if (receiverStateInternal.relayers[i] == relayerAddress) {
+                found = true;
+                index = i;
+                break;
+            }
+        }
+        
+        if (!found) revert RelayerNotFound();
+        
+        // Remove relayer
+        receiverStateInternal.relayers[index] = receiverStateInternal.relayers[receiverStateInternal.relayers.length - 1];
+        receiverStateInternal.relayers.pop();
+        delete receiverStateInternal.relayerEcdsaPubkeys[relayerAddress];
+        receiverStateInternal.relayerCount--;
+        
+        emit RelayerRemoved(relayerAddress);
+    }
+    
+    /**
+     * @notice Submit signature for cross-chain request
+     * @param eventData Stake event data from source chain
+     * @param signature ECDSA signature
+     */
+    function submitSignature(
+        StakeEventData memory eventData,
+        bytes memory signature
+    ) external onlyWhitelistedRelayer {
+        if (receiverStateInternal.usdcContract == address(0)) revert UsdcNotConfigured();
+        
+        // Verify source contract address
+        if (eventData.sourceContract != receiverStateInternal.sourceContract) revert InvalidSourceContract();
+        
+        // Verify chain ID
+        if (eventData.sourceChainId != receiverStateInternal.sourceChainId) revert InvalidChainId();
+        
+        // Verify nonce is incrementing
+        if (eventData.nonce <= receiverStateInternal.lastNonce) revert InvalidNonce();
+        
+        // Initialize nonce signature if first signature
+        NonceSignature storage nonceSignature = nonceSignatures[eventData.nonce];
+        if (nonceSignature.signatureCount == 0) {
+            nonceSignature.eventData = eventData;
+            nonceSignature.isUnlocked = false;
+        }
+        
+        // Check if relayer already signed
+        if (nonceSignature.signedRelayers[msg.sender]) revert RelayerAlreadySigned();
+        
+        // Verify ECDSA signature
+        _verifyEcdsaSignature(eventData, signature, msg.sender);
+        
+        // Record signature
+        nonceSignature.signedRelayers[msg.sender] = true;
+        nonceSignature.signatureCount++;
+        
+        emit SignatureSubmitted(msg.sender, eventData.nonce);
+        
+        // Calculate threshold: ceil(relayerCount * 2 / 3)
+        uint8 threshold = uint8((receiverStateInternal.relayerCount * 2 + 2) / 3);
+        
+        // Check if threshold is reached
+        if (nonceSignature.signatureCount >= threshold && !nonceSignature.isUnlocked) {
+            nonceSignature.isUnlocked = true;
+            receiverStateInternal.lastNonce = eventData.nonce;
+            
+            // Unlock tokens: transfer from vault to receiver
+            IERC20 usdc = IERC20(receiverStateInternal.usdcContract);
+            address receiver = _parseAddress(eventData.receiverAddress);
+            require(usdc.transferFrom(receiverStateInternal.vault, receiver, eventData.amount), "Transfer failed");
+            
+            emit TokensUnlocked(eventData.nonce, receiver, eventData.amount);
+        }
+    }
+    
+    // ============ View Functions ============
+    
+    /**
+     * @notice Check if address is a whitelisted relayer
+     * @param relayerAddress Address to check
+     * @return bool True if address is whitelisted
+     */
+    function isRelayer(address relayerAddress) external view returns (bool) {
+        for (uint i = 0; i < receiverStateInternal.relayers.length; i++) {
+            if (receiverStateInternal.relayers[i] == relayerAddress) return true;
+        }
+        return false;
+    }
+    
+    /**
+     * @notice Get total number of relayers
+     * @return uint256 Number of relayers
+     */
+    function getRelayerCount() external view returns (uint256) {
+        return receiverStateInternal.relayerCount;
+    }
+    
+    /**
+     * @notice Get sender nonce
+     * @return uint64 Current sender nonce
+     */
+    function getSenderNonce() external view returns (uint64) {
+        return senderState.nonce;
+    }
+    
+    /**
+     * @notice Get receiver last nonce
+     * @return uint64 Last processed nonce
+     */
+    function getReceiverLastNonce() external view returns (uint64) {
+        return receiverStateInternal.lastNonce;
+    }
+    
+    // ============ Internal Functions ============
+    
+    /**
+     * @notice Verify ECDSA signature (aligned with SVM implementation)
+     * @dev Hash algorithm: SHA-256(JSON.stringify(eventData))
+     * @dev Signature format: EIP-191 standard
+     */
+    function _verifyEcdsaSignature(
+        StakeEventData memory eventData,
+        bytes memory signature,
+        address signer
+    ) internal view {
+        // Signature must be 65 bytes (r, s, v)
+        if (signature.length != 65) revert InvalidSignature();
+        
+        // Hash event data using SHA-256 and JSON format (aligned with SVM)
+        bytes32 hash = _hashEventData(eventData);
+        
+        // Apply EIP-191 prefix
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
+        
+        // Extract v, r, s
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        
+        // Adjust v if necessary
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) revert InvalidSignature();
+        
+        // Recover signer address
+        address recovered = ecrecover(ethSignedHash, v, r, s);
+        if (recovered == address(0) || recovered != signer) revert InvalidSignature();
+    }
+    
+    /**
+     * @notice Hash event data using SHA-256 and JSON serialization (aligned with SVM)
+     * @dev This must match the SVM implementation: SHA-256(JSON.stringify(eventData))
+     */
+    function _hashEventData(StakeEventData memory eventData) internal pure returns (bytes32) {
+        // Serialize event data to JSON-like format to match SVM
+        // Format: {"sourceContract":"...","targetContract":"...","chainId":"...","blockHeight":"...","amount":"...","receiverAddress":"...","nonce":"..."}
+        bytes memory json = abi.encodePacked(
+            '{"sourceContract":"', _addressToString(eventData.sourceContract),
+            '","targetContract":"', _addressToString(eventData.targetContract),
+            '","chainId":"', _uint64ToString(eventData.sourceChainId),
+            '","blockHeight":"', _uint64ToString(eventData.blockHeight),
+            '","amount":"', _uint64ToString(eventData.amount),
+            '","receiverAddress":"', eventData.receiverAddress,
+            '","nonce":"', _uint64ToString(eventData.nonce),
+            '"}'
+        );
+        
+        return sha256(json);
+    }
+    
+    /**
+     * @notice Convert address to hex string (lowercase, no 0x prefix)
+     */
+    function _addressToString(address addr) internal pure returns (string memory) {
+        bytes memory alphabet = "0123456789abcdef";
+        bytes memory str = new bytes(40);
+        
+        for (uint i = 0; i < 20; i++) {
+            uint8 b = uint8(uint(uint160(addr)) / (2**(8*(19 - i))));
+            str[i*2] = alphabet[b >> 4];
+            str[i*2 + 1] = alphabet[b & 0x0f];
+        }
+        
+        return string(str);
+    }
+    
+    /**
+     * @notice Convert uint64 to string
+     */
+    function _uint64ToString(uint64 value) internal pure returns (string memory) {
+        if (value == 0) return "0";
+        
+        uint256 temp = value;
+        uint256 digits;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+        
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits--;
+            buffer[digits] = bytes1(uint8(48 + value % 10));
+            value /= 10;
+        }
+        
+        return string(buffer);
+    }
+    
+    /**
+     * @notice Parse address from string (hex format)
+     */
+    function _parseAddress(string memory addressStr) internal pure returns (address) {
+        bytes memory strBytes = bytes(addressStr);
+        require(strBytes.length == 40 || strBytes.length == 42, "Invalid address length");
+        
+        uint256 start = 0;
+        if (strBytes.length == 42) {
+            require(strBytes[0] == '0' && (strBytes[1] == 'x' || strBytes[1] == 'X'), "Invalid hex prefix");
+            start = 2;
+        }
+        
+        uint160 result = 0;
+        for (uint i = start; i < strBytes.length; i++) {
+            uint8 digit = uint8(strBytes[i]);
+            uint8 value;
+            
+            if (digit >= 48 && digit <= 57) {
+                value = digit - 48;
+            } else if (digit >= 65 && digit <= 70) {
+                value = digit - 55;
+            } else if (digit >= 97 && digit <= 102) {
+                value = digit - 87;
+            } else {
+                revert("Invalid hex character");
+            }
+            
+            result = result * 16 + value;
+        }
+        
+        return address(result);
+    }
+}
+
