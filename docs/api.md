@@ -19,11 +19,10 @@
 
 | 模块 | 类别 | 接口名称 | 权限 | 主要参数 | 返回值/输出 | 功能效果 |
 |------|------|----------|------|----------|-------------|----------|
-| 发送端合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`, `adminAddress` | 无 | 初始化合约，设置金库和管理员地址 |
-| 发送端合约 | 配置 | `configureTarget` | `onlyAdmin` | `targetContract`, `sourceChainId`, `targetChainId` | 无 | 配置对端接收端合约和链ID |
-| 发送端合约 | 质押 | `stake` | 公开 | `amount`, `receiverAddress` | `nonce` | 质押USDC，触发`StakeEvent`事件 |
-| 接收端合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`, `adminAddress` | 无 | 初始化合约，设置金库和管理员地址 |
-| 接收端合约 | 配置 | `configureSource` | `onlyAdmin` | `sourceContract`, `sourceChainId`, `targetChainId` | 无 | 配置对端发送端合约和链ID |
+| 统一合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`, `adminAddress` | 无 | 统一初始化发送端和接收端合约，设置共享金库和管理员地址 |
+| 统一合约 | 配置 | `configure_usdc` | `onlyAdmin` | `usdcAddress` | 无 | 配置USDC代币地址（SVM为mint account，EVM为合约地址） |
+| 统一合约 | 配置 | `configure_peer` | `onlyAdmin` | `peerContract`, `sourceChainId`, `targetChainId` | 无 | 统一配置对端合约和链ID（同时配置发送端和接收端） |
+| 发送端合约 | 质押 | `stake` | 公开 | `amount`, `receiverAddress` | `nonce` | 质押USDC，触发`StakeEvent`事件，nonce自动递增 |
 | 接收端合约 | 白名单管理 | `addRelayer` | `onlyAdmin` | `relayerAddress` | 无 | 添加Relayer到白名单 |
 | 接收端合约 | 白名单管理 | `removeRelayer` | `onlyAdmin` | `relayerAddress` | 无 | 从白名单移除Relayer |
 | 接收端合约 | 白名单查询 | `isRelayer` | 公开（view） | `relayerAddress` | `bool` | 查询地址是否为Relayer |
@@ -57,46 +56,92 @@
 | 1024chain RPC | `https://testnet-rpc.1024chain.com/rpc/` | 待配置 | 1024chain网络RPC端点 |
 | Arbitrum Chain ID | 421614 | 42161 | 链标识符 |
 | 1024chain Chain ID | 91024 | 待确认 | 链标识符 |
-| Relayer数量 | ≥ 3 | ≥ 3 | 中继节点数量 |
+| Relayer数量 | ≥ 3，最多18个 | ≥ 3，最多18个 | 中继节点数量 |
 | 签名阈值 | > 2/3 * relayer总数 | > 2/3 * relayer总数 | 解锁所需签名比例 |
+| 未完成请求 | 至少100个 | 至少100个 | 同时支持的未完成跨链请求数量 |
+| 签名缓存 | 至少1200个 | 至少1200个 | 同时缓存的relayer签名数量（100请求×18relayer） |
 
 ---
 
 ## 智能合约 API
 
-### 发送端合约 API
+### 统一初始化 API（SVM）
 
-#### 初始化
+**重要变更：** 在 Solana (SVM) 平台上，发送端和接收端合约的初始化合并为一个 `initialize` 指令。
+
+#### 统一初始化
 
 ```
 function initialize(
-    address vaultAddress,      // 质押金库地址
-    address adminAddress       // 管理员钱包地址
+    address vaultAddress,      // 质押金库地址（发送端和接收端共享）
+    address adminAddress       // 管理员钱包地址（发送端和接收端共享）
 ) onlyAdmin
 ```
 
 **参数说明：**
-- `vaultAddress`：存储质押代币的金库地址
-- `adminAddress`：具有管理权限的钱包地址（**注意：与接收端合约的管理员钱包地址相同**）
+- `vaultAddress`：存储质押代币的金库地址（发送端和接收端共享同一个金库）
+- `adminAddress`：具有管理权限的钱包地址（发送端和接收端共享同一个管理员）
 
 **权限：** 仅管理员可调用
 
-#### 对端配置
+**功能描述：**
+1. 同时创建 `SenderState` 和 `ReceiverState` 账户
+2. 初始化发送端 nonce 为 0
+3. 初始化接收端 last_nonce 为 0
+4. 设置共享的 vault 和 admin 地址
+
+#### 配置USDC代币地址
 
 ```
-function configureTarget(
-    address targetContract,    // 对端接收端合约地址
+function configure_usdc(
+    address usdcAddress        // USDC代币地址
+) onlyAdmin
+```
+
+**参数说明：**
+- `usdcAddress`：USDC代币地址
+  - **SVM端**：USDC的SPL Token mint account地址（Pubkey）
+  - **EVM端**：USDC的ERC20合约地址（address）
+
+**权限：** 仅管理员可调用
+
+**功能描述：**
+1. 同时配置发送端和接收端的 `usdc_mint` 字段
+2. 因为两端使用同一个USDC代币，所以共享相同的地址
+3. 必须在调用 `stake` 或 `submit_signature` 之前配置
+
+**注意事项：**
+- 不同网络（测试网/主网）的USDC地址不同，需要根据部署网络正确配置
+- 配置后，所有质押和解锁操作都将使用该USDC地址
+- **必须在调用 `stake` 或 `submit_signature` 之前配置，否则这些函数会返回错误**
+
+**错误处理：**
+- 如果未配置USDC地址，`stake` 和 `submit_signature` 函数会返回错误 "USDC address not configured"
+- 可以通过检查 `usdc_mint` 是否为无效地址（如 `Pubkey::default()` 或 `address(0)`）来判断是否已配置
+
+#### 统一对端配置
+
+```
+function configure_peer(
+    address peerContract,      // 对端合约地址（发送端和接收端共享同一个对端）
     uint256 sourceChainId,     // 自己的 chain id
     uint256 targetChainId      // 对端的 chain id
 ) onlyAdmin
 ```
 
 **参数说明：**
-- `targetContract`：对端接收端合约地址
+- `peerContract`：对端合约地址（发送端和接收端共享同一个对端，所以只需要一个地址）
 - `sourceChainId`：当前链的 chain id
-- `targetChainId`：目标链的 chain id
+- `targetChainId`：对端链的 chain id
 
 **权限：** 仅管理员可调用
+
+**功能描述：**
+1. 同时配置发送端的 `target_contract`、`source_chain_id`、`target_chain_id`
+2. 同时配置接收端的 `source_contract`、`source_chain_id`、`target_chain_id`
+3. 因为对端是同一个，所以两个配置共享相同的参数
+
+### 发送端合约 API
 
 #### 质押接口
 
@@ -115,9 +160,17 @@ function stake(
 - `nonce`：本次质押的唯一序号
 
 **功能描述：**
-1. 将用户的 USDC 转入质押金库地址
-2. 生成单调递增的 nonce
-3. 触发质押事件
+1. **验证USDC地址已配置**：如果 `usdc_mint` 未配置（为无效地址），返回错误 "USDC address not configured"
+2. 将用户的 USDC 转入质押金库地址（使用配置的 `usdc_mint` 地址）
+3. 生成单调递增的 nonce（64位无符号整数）：
+   - 当前 nonce = `sender_state.nonce`
+   - 新 nonce = `current_nonce + 1`
+   - 如果 `new_nonce == 0`（溢出），重置为 0
+   - 更新 `sender_state.nonce = new_nonce`
+4. 触发质押事件
+
+**错误情况：**
+- `USDC address not configured`：USDC地址未配置，需要先调用 `configure_usdc` 函数
 
 #### 质押事件
 
@@ -140,43 +193,17 @@ event StakeEvent(
 - `blockHeight`：交易发生时的区块高度（防止重放）
 - `amount`：质押的代币数量
 - `receiverAddress`：接收端的地址
-- `nonce`：单调递增的序号，防止重放攻击
+- `nonce`：单调递增的序号（64位无符号整数），防止重放攻击。当达到最大值时自动重置为0
 
 ---
 
 ### 接收端合约 API
 
-#### 初始化
+**注意：** 在 SVM 平台上：
+- 接收端合约的初始化已合并到统一的 `initialize` 指令中（见上方"统一初始化 API"）
+- 接收端合约的对端配置已合并到统一的 `configure_peer` 指令中（见上方"统一对端配置"）
 
-```
-function initialize(
-    address vaultAddress,      // 质押金库地址
-    address adminAddress       // 管理员钱包地址
-) onlyAdmin
-```
-
-**参数说明：**
-- `vaultAddress`：存储待解锁代币的金库地址（**注意：与发送端合约的质押金库地址相同。由于之后要自动完成转账，需要合约本身有转账的权力，具体在EVM和SVM中实现有所不同**）
-- `adminAddress`：具有管理权限的钱包地址（**注意：与发送端合约的管理员钱包地址相同**）
-
-**权限：** 仅管理员可调用
-
-#### 对端配置
-
-```
-function configureSource(
-    address sourceContract,    // 对端发送端合约地址
-    uint256 sourceChainId,     // 对端的 chain id
-    uint256 targetChainId      // 自己的 chain id
-) onlyAdmin
-```
-
-**参数说明：**
-- `sourceContract`：对端发送端合约地址
-- `sourceChainId`：源链的 chain id
-- `targetChainId`：当前链的 chain id
-
-**权限：** 仅管理员可调用
+在 EVM 平台上，接收端合约仍使用独立的 `initialize` 和 `configureSource` 函数。
 
 #### Relayer 白名单管理
 
@@ -252,14 +279,22 @@ struct StakeEventData {
 
 **功能描述：**
 1. 验证调用者在 relayer 白名单中
-2. **验证源链合约地址正确**（与配置的 sourceContract 匹配）
-3. **验证 chain id 正确**（与配置的 sourceChainId 匹配）
-4. 验证签名的合法性
-5. 检查 nonce 是否已被使用
-6. 记录该 relayer 的签名
-7. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
-8. 解锁操作：从金库向接收地址转账等量 USDC
-9. 标记 nonce 为已使用，防止重放
+2. **验证USDC地址已配置**：如果 `usdc_mint` 未配置（为无效地址），返回错误 "USDC address not configured"
+3. **验证源链合约地址正确**（与配置的 sourceContract 匹配）
+4. **验证 chain id 正确**（与配置的 sourceChainId 匹配）
+5. 验证签名的合法性
+6. **检查 nonce 是否递增**：
+   - 如果 `nonce <= last_nonce`，拒绝（重放攻击）
+   - 如果 `nonce > last_nonce`，继续处理
+7. 获取或创建 `CrossChainRequest` PDA 账户（为每个请求创建独立账户）
+8. 检查该 relayer 是否已为此 nonce 签名
+9. 记录该 relayer 的签名到 `CrossChainRequest.signed_relayers`
+10. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
+11. 解锁操作：从金库向接收地址转账等量 USDC（使用配置的 `usdc_mint` 地址）
+12. 更新 `last_nonce = nonce`（标记为已使用），防止重放
+
+**错误情况：**
+- `USDC address not configured`：USDC地址未配置，需要先调用 `configure_usdc` 函数
 
 ---
 
@@ -299,7 +334,7 @@ function processEvent(eventData: StakeEventData)
 **验证规则：**
 - `sourceContract`：必须匹配配置中的发送端合约地址
 - `chainId`：必须匹配配置中的发送端链 ID
-- `nonce`：检查本地缓存，确保未处理过该 nonce（可选，接收端合约也会验证）
+- `nonce`：检查本地缓存，确保 nonce 大于已处理的最大 nonce（可选，接收端合约也会通过递增判断验证）
 
 ---
 
@@ -344,7 +379,7 @@ Relayer 调用: submitSignature(eventData, signature)
 
 #### ReceiverState 主账户
 
-存储固定大小的配置数据，支持最多 21 个 relayer 和最近 1000 个已使用的 nonce：
+存储固定大小的配置数据，支持最多 18 个 relayer：
 
 ```rust
 pub struct ReceiverState {
@@ -354,32 +389,40 @@ pub struct ReceiverState {
     pub source_contract: Pubkey,    // 32 bytes
     pub source_chain_id: u64,       // 8 bytes
     pub target_chain_id: u64,       // 8 bytes
-    pub relayers: Vec<Pubkey>,      // 4 + 32 * 21 = 676 bytes
-    pub used_nonces: Vec<u64>,      // 4 + 8 * 1000 = 8004 bytes
+    pub relayers: Vec<Pubkey>,      // 4 + 32 * 18 = 580 bytes
+    pub last_nonce: u64,            // 8 bytes (用于nonce递增判断)
 }
 ```
 
-**账户大小：** ~8800 bytes（在 10KB 限制内）
+**账户大小：** ~708 bytes（在 10KB 限制内）
 
-#### NonceSignature PDA 账户
+**设计说明：**
+- `relayers`: 最多支持 18 个 relayer
+- `last_nonce`: 记录最后一个已使用的 nonce，用于判断新 nonce 是否递增
+- Nonce 使用 64 位无符号整数（u64），通过递增判断来防止重放攻击
 
-为每个 nonce 创建独立的 PDA 账户存储签名记录，支持无限 nonce：
+#### CrossChainRequest PDA 账户
+
+为每个跨链请求（nonce）创建独立的 PDA 账户来存储 relayer 签名缓存：
 
 ```rust
-pub struct NonceSignature {
+pub struct CrossChainRequest {
     pub nonce: u64,                    // 8 bytes
-    pub signed_relayers: Vec<Pubkey>,   // 4 + 32 * 21 = 676 bytes
+    pub signed_relayers: Vec<Pubkey>,   // 4 + 32 * 18 = 580 bytes
     pub signature_count: u8,            // 1 byte
     pub is_unlocked: bool,              // 1 byte
+    pub event_data: StakeEventData,     // 事件数据（用于验证和转账）
 }
 ```
 
-**PDA 种子：** `[b"nonce_signature", nonce.to_le_bytes()]`  
-**账户大小：** ~690 bytes（固定大小）
+**PDA 种子：** `[b"cross_chain_request", nonce.to_le_bytes()]`  
+**账户大小：** ~600+ bytes（固定大小）
 
 **设计优势：**
+- **支持至少 100 个未完成的请求**：每个请求独立账户，可同时存在 100+ 个未完成的请求
+- **支持 1200 个签名缓存**：100 个请求 × 18 个 relayer = 1800 个签名（超过要求的 1200 个）
 - 支持理论上无限次请求（每个 nonce 独立账户）
-- 支持最多 21 个 relayer
+- 支持最多 18 个 relayer
 - 固定大小，易于管理
 - 解锁后可以关闭账户回收租金
 
@@ -435,9 +478,21 @@ require(isRelayer(recoveredAddress), "Invalid signature")
 - 管理员地址（EVM）
 - 管理员地址（SVM）
 
+### USDC代币地址配置
+
+**SVM端（1024chain）：**
+- USDC mint account地址：需要在部署时配置，通过 `configure_usdc` 函数设置
+- 测试网USDC mint地址：待确认
+- 主网USDC mint地址：待确认
+
+**EVM端（Arbitrum）：**
+- USDC ERC20合约地址：需要在部署时配置，通过 `configure_usdc` 函数设置
+- Arbitrum Sepolia USDC地址：待确认
+- Arbitrum Mainnet USDC地址：`0xaf88d065e77c8cC2239327C5EDb3A432268e5831`（参考，需确认）
+
 ### Relayer 配置
 
-- Relayer 数量：≥ 3，最多 21 个
+- Relayer 数量：≥ 3，最多 18 个
 - 签名阈值：`Math.ceil(relayer_count * 2 / 3)`
 - Relayer 私钥列表：每个 relayer 独立保管
 
@@ -445,4 +500,12 @@ require(isRelayer(recoveredAddress), "Invalid signature")
 - 3 个 Relayer → 阈值 2
 - 4 个 Relayer → 阈值 3
 - 5 个 Relayer → 阈值 4
-- 21 个 Relayer → 阈值 15
+- 18 个 Relayer → 阈值 13
+
+### Nonce 处理
+
+- **Nonce 类型**：64 位无符号整数（u64）
+- **Nonce 递增判断**：新 nonce 必须大于 `last_nonce`，否则视为重放攻击
+- **Nonce 溢出处理**：当 nonce 达到 `u64::MAX` (18,446,744,073,709,551,615) 时，自动重置为 0
+- **未完成请求支持**：至少支持 100 个未完成的跨链请求同时存在
+- **签名缓存容量**：至少支持 1200 个签名缓存（100 个请求 × 18 个 relayer = 1800 个签名）
