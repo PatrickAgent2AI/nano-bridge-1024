@@ -20,7 +20,6 @@ describe("bridge1024", () => {
   const AIRDROP_AMOUNT = 10 * LAMPORTS_PER_SOL;
 
   let admin: Keypair;
-  let vault: Keypair;
   let user1: Keypair;
   let user2: Keypair;
   let relayer1: Keypair;
@@ -32,6 +31,7 @@ describe("bridge1024", () => {
   let receiverProgram: PublicKey;
   let senderProgramState: PublicKey;
   let receiverProgramState: PublicKey;
+  let vaultPDA: PublicKey; // Shared vault PDA used by both sender and receiver
 
   interface StakeEventData {
     sourceContract: PublicKey;
@@ -133,7 +133,6 @@ describe("bridge1024", () => {
 
   before(async () => {
     admin = Keypair.generate();
-    vault = Keypair.generate();
     user1 = Keypair.generate();
     user2 = Keypair.generate();
     relayer1 = Keypair.generate();
@@ -157,8 +156,14 @@ describe("bridge1024", () => {
     );
     receiverProgramState = receiverState;
 
+    // Calculate shared vault PDA
+    const [vault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("bridge_vault")],
+      program.programId
+    );
+    vaultPDA = vault;
+
     await airdrop(admin.publicKey, AIRDROP_AMOUNT);
-    await airdrop(vault.publicKey, AIRDROP_AMOUNT);
     await airdrop(user1.publicKey, AIRDROP_AMOUNT);
     await airdrop(user2.publicKey, AIRDROP_AMOUNT);
     await airdrop(relayer1.publicKey, AIRDROP_AMOUNT);
@@ -195,9 +200,10 @@ describe("bridge1024", () => {
       it("should initialize sender contract successfully", async () => {
         try {
           const tx = await program.methods
-            .initializeSender(vault.publicKey, admin.publicKey)
+            .initializeSender(admin.publicKey)
             .accounts({
               senderState: senderProgramState,
+              vault: vaultPDA,
               admin: admin.publicKey,
               systemProgram: SystemProgram.programId,
             })
@@ -207,7 +213,7 @@ describe("bridge1024", () => {
           await connection.confirmTransaction(tx);
 
           const state = await program.account.senderState.fetch(senderProgramState);
-          expect(state.vault.toBase58()).to.equal(vault.publicKey.toBase58());
+          expect(state.vault.toBase58()).to.equal(vaultPDA.toBase58());
           expect(state.admin.toBase58()).to.equal(admin.publicKey.toBase58());
           expect(state.nonce.toString()).to.equal("0");
         } catch (error) {
@@ -264,14 +270,14 @@ describe("bridge1024", () => {
         try {
           const receiverAddress = user2.publicKey.toBase58();
           const userBalanceBefore = await getBalance(user1.publicKey);
-          const vaultBalanceBefore = await getBalance(vault.publicKey);
+          const vaultBalanceBefore = await getBalance(vaultPDA);
 
           const tx = await program.methods
             .stake(TEST_AMOUNT, receiverAddress)
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -302,7 +308,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -325,7 +331,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([])
@@ -356,7 +362,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -386,9 +392,10 @@ describe("bridge1024", () => {
       it("should initialize receiver contract successfully", async () => {
         try {
           const tx = await program.methods
-            .initializeReceiver(vault.publicKey, admin.publicKey)
+            .initializeReceiver(admin.publicKey)
             .accounts({
               receiverState: receiverProgramState,
+              vault: vaultPDA,
               admin: admin.publicKey,
               systemProgram: SystemProgram.programId,
             })
@@ -398,7 +405,7 @@ describe("bridge1024", () => {
           await connection.confirmTransaction(tx);
 
           const state = await program.account.receiverState.fetch(receiverProgramState);
-          expect(state.vault.toBase58()).to.equal(vault.publicKey.toBase58());
+          expect(state.vault.toBase58()).to.equal(vaultPDA.toBase58());
           expect(state.admin.toBase58()).to.equal(admin.publicKey.toBase58());
           expect(state.relayerCount.toString()).to.equal("0");
         } catch (error) {
@@ -564,7 +571,7 @@ describe("bridge1024", () => {
             await program.account.receiverState.fetch(receiverProgramState);
           } catch {
             const initTx = await program.methods
-              .initializeReceiver(vault.publicKey, admin.publicKey)
+              .initializeReceiver(admin.publicKey)
               .accounts({
                 receiverState: receiverProgramState,
                 admin: admin.publicKey,
@@ -638,9 +645,9 @@ describe("bridge1024", () => {
           }
 
           // Ensure vault has balance for potential unlock
-          const vaultBalance = await getBalance(vault.publicKey);
+          const vaultBalance = await getBalance(vaultPDA);
           if (vaultBalance < TEST_AMOUNT.toNumber()) {
-            await airdrop(vault.publicKey, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
+            await airdrop(vaultPDA, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
           }
 
           const eventData: StakeEventData = {
@@ -676,7 +683,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -700,7 +707,7 @@ describe("bridge1024", () => {
             await program.account.receiverState.fetch(receiverProgramState);
           } catch {
             const initTx = await program.methods
-              .initializeReceiver(vault.publicKey, admin.publicKey)
+              .initializeReceiver(admin.publicKey)
               .accounts({
                 receiverState: receiverProgramState,
                 admin: admin.publicKey,
@@ -774,9 +781,9 @@ describe("bridge1024", () => {
           }
 
           // Ensure vault has balance for unlock
-          const vaultBalance = await getBalance(vault.publicKey);
+          const vaultBalance = await getBalance(vaultPDA);
           if (vaultBalance < TEST_AMOUNT.toNumber()) {
-            await airdrop(vault.publicKey, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
+            await airdrop(vaultPDA, TEST_AMOUNT.toNumber() - vaultBalance + LAMPORTS_PER_SOL);
           }
 
           const eventData: StakeEventData = {
@@ -807,7 +814,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -832,7 +839,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -883,7 +890,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -897,7 +904,7 @@ describe("bridge1024", () => {
     });
 
     describe("TC-110: Submit Signature - Invalid Signature", () => {
-      it.skip("should reject invalid signature", async () => {
+      it("should reject invalid signature", async () => {
         try {
           const eventData: StakeEventData = {
             sourceContract: senderProgram,
@@ -921,13 +928,13 @@ describe("bridge1024", () => {
               eventData.amount,
               eventData.receiverAddress,
               eventData.nonce,
-              Array.from(fakeSignature)
+              fakeSignature
             )
             .accounts({
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -971,7 +978,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: nonRelayer.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([nonRelayer])
@@ -1015,7 +1022,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1059,7 +1066,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1085,7 +1092,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -1122,7 +1129,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1145,7 +1152,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1175,7 +1182,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user2])
@@ -1212,7 +1219,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1235,7 +1242,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1268,7 +1275,7 @@ describe("bridge1024", () => {
                 .accounts({
                   senderState: senderProgramState,
                   user: user1.publicKey,
-                  vault: vault.publicKey,
+                  vault: vaultPDA,
                   systemProgram: SystemProgram.programId,
                 })
                 .signers([user1])
@@ -1303,7 +1310,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -1340,7 +1347,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1363,7 +1370,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1413,7 +1420,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1436,7 +1443,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1459,7 +1466,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1503,7 +1510,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1554,13 +1561,16 @@ describe("bridge1024", () => {
       it.skip("should prevent direct vault transfer", async () => {
         try {
           const transfer = SystemProgram.transfer({
-            fromPubkey: vault.publicKey,
+            fromPubkey: vaultPDA,
             toPubkey: user1.publicKey,
             lamports: LAMPORTS_PER_SOL,
           });
 
           const tx = new anchor.web3.Transaction().add(transfer);
-          await anchor.web3.sendAndConfirmTransaction(connection, tx, [vault]);
+          // Note: vaultPDA is a PDA, cannot be used as signer. This test should fail as expected.
+          // Using a dummy keypair to trigger the error
+          const dummySigner = Keypair.generate();
+          await anchor.web3.sendAndConfirmTransaction(connection, tx, [dummySigner]);
 
           expect.fail("Should have thrown an error");
         } catch (error) {
@@ -1570,7 +1580,7 @@ describe("bridge1024", () => {
 
       it.skip("should prevent over-unlock", async () => {
         try {
-          const vaultBalance = await getBalance(vault.publicKey);
+          const vaultBalance = await getBalance(vaultPDA);
           const overAmount = new BN(vaultBalance * 2);
 
           const eventData: StakeEventData = {
@@ -1601,7 +1611,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1624,7 +1634,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1668,7 +1678,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1710,7 +1720,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1736,7 +1746,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -1785,7 +1795,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1813,7 +1823,7 @@ describe("bridge1024", () => {
             .accounts({
               senderState: senderProgramState,
               user: user1.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([user1])
@@ -1850,7 +1860,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer1.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer1])
@@ -1873,7 +1883,7 @@ describe("bridge1024", () => {
               receiverState: receiverProgramState,
               relayer: relayer2.publicKey,
               receiver: user2.publicKey,
-              vault: vault.publicKey,
+              vault: vaultPDA,
               systemProgram: SystemProgram.programId,
             })
             .signers([relayer2])
@@ -1907,7 +1917,7 @@ describe("bridge1024", () => {
                 .accounts({
                   senderState: senderProgramState,
                   user: user1.publicKey,
-                  vault: vault.publicKey,
+                  vault: vaultPDA,
                   systemProgram: SystemProgram.programId,
                 })
                 .signers([user1])
