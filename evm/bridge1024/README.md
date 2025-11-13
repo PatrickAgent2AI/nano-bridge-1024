@@ -144,12 +144,48 @@ forge coverage
 forge test --gas-report
 ```
 
+## 部署
+
+### 快速部署到 Arbitrum Sepolia
+
+```bash
+cd ../../scripts
+
+# 使用自动化脚本（推荐）
+./deploy-evm.sh
+
+# 部署测试用 MockUSDC
+./deploy-mock-usdc.sh
+```
+
+### 手动部署
+
+```bash
+# 编译
+forge build
+
+# 部署
+forge create \
+  --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
+  --private-key $ADMIN_EVM_PRIVATE_KEY \
+  src/Bridge1024.sol:Bridge1024
+
+# 初始化
+cast send <CONTRACT_ADDRESS> \
+  "initialize(address,address)" \
+  $EVM_VAULT_ADDRESS \
+  $EVM_ADMIN_ADDRESS \
+  --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
+  --private-key $ADMIN_EVM_PRIVATE_KEY
+```
+
+详细部署文档见 [../../scripts/README.md](../../scripts/README.md#部署脚本)
+
 ## 待完成工作
 
-1. **部署脚本**：编写部署和初始化脚本
+1. ~~**部署脚本**~~：✅ 已完成（deploy-evm.sh）
 2. **性能优化**：可选的 Gas 优化（当前性能已满足要求）
 3. **安全审计**：进行外部安全审计
-4. **文档完善**：补充部署和运维文档
 
 ## 与 SVM 的对齐
 

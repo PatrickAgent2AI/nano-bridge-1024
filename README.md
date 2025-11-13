@@ -6,7 +6,7 @@
 
 ## 开发状态
 
-**当前阶段：** M3 - SVM 合约开发（核心功能已完成 ✅）
+**当前阶段：** M4 - Relayer 服务开发（技术选型和测试框架设计完成 ✅）
 
 **最新进展（2025-11-13）：**
 - ✅ **SVM 合约核心功能开发完成**
@@ -34,6 +34,14 @@
   - 修复 @noble/ed25519 依赖版本和配置
   - 实现完整的 Borsh 序列化匹配
   - 所有签名验证测试通过
+- ✅ **部署和运维脚本完善**
+  - ✅ EVM 合约自动化部署脚本（deploy-evm.sh）
+  - ✅ SVM 合约自动化部署脚本（deploy-svm.sh）
+  - ✅ MockUSDC 自动化部署脚本（deploy-mock-usdc.sh）
+  - ✅ 支持 Arbitrum Sepolia 和 1024chain Testnet
+  - ✅ 简洁输出，自动更新 .env 配置
+  - ✅ 使用相对路径，支持灵活部署
+  - ✅ TypeScript 管理员和用户操作脚本（evm-admin.ts, evm-user.ts, svm-admin.ts, svm-user.ts）
 
 **详细进度：** 参见 [docs/progress.md](docs/progress.md)  
 **测试计划：** 参见 [docs/testplan.md](docs/testplan.md)  
@@ -73,6 +81,73 @@
 - 监听 SVM 事件 → 用 ECDSA 签名 → 提交到 EVM
 - 监听 EVM 事件 → 用 Ed25519 签名 → 提交到 SVM
 
+## 快速开始
+
+### 1. 部署合约
+
+#### EVM 合约（Arbitrum Sepolia）
+
+```bash
+# 前置条件：安装 Foundry
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+
+# 配置环境变量
+cd scripts
+cp ../.env.example ../.env
+# 编辑 .env 文件，填写 ADMIN_EVM_PRIVATE_KEY 等必要配置
+
+# 部署合约（自动编译、部署、初始化）
+./deploy-evm.sh
+
+# （可选）部署测试用 MockUSDC
+./deploy-mock-usdc.sh
+```
+
+#### SVM 合约（1024chain Testnet）
+
+```bash
+# 前置条件：安装 Anchor 和 Solana CLI
+cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
+sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+
+# 配置钱包（如果还没有）
+solana-keygen new -o ~/.config/solana/id.json
+
+# 部署合约（自动编译和部署）
+cd scripts
+./deploy-svm.sh
+```
+
+详细说明见 [scripts/README.md](scripts/README.md#部署脚本)
+
+### 2. 配置合约
+
+```bash
+cd scripts
+
+# EVM 端配置
+ts-node evm-admin.ts configure_usdc     # 配置 USDC 地址
+ts-node evm-admin.ts configure_peer     # 配置对端合约
+ts-node evm-admin.ts add_relayer        # 添加 relayers
+ts-node evm-admin.ts add_liquidity      # 增加流动性
+
+# SVM 端配置（类似）
+ts-node svm-admin.ts configure_usdc
+ts-node svm-admin.ts configure_peer
+ts-node svm-admin.ts add_relayer
+ts-node svm-admin.ts add_liquidity
+```
+
+### 3. 用户跨链转账
+
+```bash
+# 从 EVM 到 SVM
+ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
+
+# 从 SVM 到 EVM
+ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
+```
+
 ## 使用方法
 
 ### 跨链转账流程
@@ -106,10 +181,28 @@
 
 ### 中继服务
 
-- **relayer/**：中继服务器
-  - 监听发送端链的质押事件
-  - 对事件数据进行签名
-  - 将签名数据提交到接收端合约
+- **relayer/**：中继服务器（Rust 实现 🦀）
+  - **双服务架构**：s2e (SVM→EVM) 和 e2s (EVM→SVM) 独立进程
+  - **s2e 服务**：监听 1024chain 事件 → ECDSA 签名 → 提交到 Arbitrum
+  - **e2s 服务**：监听 Arbitrum 事件 → Ed25519 签名 → 提交到 1024chain
+  - **HTTP API**：暴露健康检查、状态查询、任务队列等接口
+  - **高性能架构**：Tokio 异步运行时 + Redis 任务队列 + Worker Pool
+  - 详细设计见 [relayer/README.md](relayer/README.md)
+
+### 部署和运维脚本
+
+- **scripts/**：部署和操作脚本（TypeScript + Shell）
+  - **部署脚本**：
+    - `deploy-evm.sh`：自动化部署 EVM 合约到 Arbitrum Sepolia
+    - `deploy-svm.sh`：自动化部署 SVM 合约到 1024chain Testnet
+    - `deploy-mock-usdc.sh`：部署测试用 MockUSDC 合约
+  - **管理员脚本**：
+    - `evm-admin.ts`：EVM 合约管理操作（初始化、配置、流动性管理）
+    - `svm-admin.ts`：SVM 合约管理操作
+  - **用户脚本**：
+    - `evm-user.ts`：EVM 用户操作（质押、查询余额）
+    - `svm-user.ts`：SVM 用户操作
+  - 详细文档见 [scripts/README.md](scripts/README.md)
 
 ### 文档
 
