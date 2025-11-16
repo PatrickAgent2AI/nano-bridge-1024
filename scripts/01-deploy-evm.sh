@@ -142,3 +142,46 @@ if [ -f "$ENV_FILE" ]; then
     fi
 fi
 
+# ==============================================================================
+# 同步配置到 Relayer
+# ==============================================================================
+
+echo ""
+echo -e "${YELLOW}同步配置到 Relayer...${NC}"
+
+RELAYER_DIR="$PROJECT_ROOT/relayer"
+UPDATED_COUNT=0
+
+# 更新 e2s-listener 配置（SOURCE_CHAIN）
+if [ -f "$RELAYER_DIR/e2s-listener/.env" ]; then
+    if grep -q "^SOURCE_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/e2s-listener/.env"; then
+        sed -i "s|^SOURCE_CHAIN__CONTRACT_ADDRESS=.*|SOURCE_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/e2s-listener/.env"
+        echo -e "${GREEN}✓ 已更新 e2s-listener/.env${NC}"
+        UPDATED_COUNT=$((UPDATED_COUNT + 1))
+    fi
+fi
+
+# 更新 e2s-submitter 配置（SOURCE_CHAIN）
+if [ -f "$RELAYER_DIR/e2s-submitter/.env" ]; then
+    if grep -q "^SOURCE_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/e2s-submitter/.env"; then
+        sed -i "s|^SOURCE_CHAIN__CONTRACT_ADDRESS=.*|SOURCE_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/e2s-submitter/.env"
+        echo -e "${GREEN}✓ 已更新 e2s-submitter/.env${NC}"
+        UPDATED_COUNT=$((UPDATED_COUNT + 1))
+    fi
+fi
+
+# 更新 s2e 配置（TARGET_CHAIN）
+if [ -f "$RELAYER_DIR/s2e/.env" ]; then
+    if grep -q "^TARGET_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/s2e/.env"; then
+        sed -i "s|^TARGET_CHAIN__CONTRACT_ADDRESS=.*|TARGET_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/s2e/.env"
+        echo -e "${GREEN}✓ 已更新 s2e/.env${NC}"
+        UPDATED_COUNT=$((UPDATED_COUNT + 1))
+    fi
+fi
+
+if [ $UPDATED_COUNT -eq 0 ]; then
+    echo -e "${YELLOW}⚠ 未找到 Relayer 配置文件，跳过同步${NC}"
+else
+    echo -e "${GREEN}✓ 已同步 $UPDATED_COUNT 个 Relayer 配置文件${NC}"
+fi
+

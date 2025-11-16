@@ -3155,6 +3155,7 @@ dependencies = [
  "axum",
  "base64 0.21.7",
  "borsh",
+ "bs58",
  "chrono",
  "config",
  "dotenvy",

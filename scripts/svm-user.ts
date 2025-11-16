@@ -7,18 +7,44 @@
  * 1. stake - 质押 USDC 到跨链桥
  */
 
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
+import { 
+  Connection, 
+  Keypair, 
+  PublicKey, 
+  Transaction,
+  SystemProgram,
+  sendAndConfirmTransaction,
+  TransactionInstruction
+} from '@solana/web3.js';
 import { Program, AnchorProvider, Wallet, BN } from '@coral-xyz/anchor';
-import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { 
+  getAssociatedTokenAddress, 
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountInstruction,
+  getAccount
+} from '@solana/spl-token';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
 
+// 加载 IDL
+const IDL_PATH = path.resolve(__dirname, '../svm/bridge1024/target/idl/bridge1024.json');
+let IDL: any = null;
+try {
+  if (fs.existsSync(IDL_PATH)) {
+    IDL = JSON.parse(fs.readFileSync(IDL_PATH, 'utf-8'));
+    console.log(`✓ IDL 文件已加载: ${IDL_PATH}`);
+  } else {
+    console.warn(`⚠️  IDL 文件不存在: ${IDL_PATH}`);
+    console.warn('   将使用手动构建指令的方式（需要确保 discriminator 正确）');
+  }
+} catch (e: any) {
+  console.warn(`⚠️  无法加载 IDL 文件: ${e.message}`);
+  console.warn('   将使用手动构建指令的方式（需要确保 discriminator 正确）');
+}
+
 // 加载环境变量
 dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
-
-// IDL 类型定义（需要从实际的 IDL 文件导入）
-// import { Bridge1024 } from '../target/types/bridge1024';
 
 // ============ 配置 ============
 
@@ -66,8 +92,38 @@ function createConnection(rpcUrl: string): Connection {
   return new Connection(rpcUrl, {
     commitment: 'confirmed',
     wsEndpoint: undefined, // 禁用 WebSocket，避免 ws error: 405
-    confirmTransactionInitialTimeout: 120000,
+    confirmTransactionInitialTimeout: 5000, // 5秒超时
   });
+}
+
+/**
+ * 使用 RPC 轮询交易状态（带超时）
+ */
+async function pollTransactionStatus(
+  connection: Connection,
+  signature: string,
+  maxAttempts: number = 10,
+  delayMs: number = 500
+): Promise<'success' | 'failed' | 'timeout'> {
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const status = await connection.getSignatureStatus(signature);
+      
+      if (status?.value?.confirmationStatus === 'confirmed' || 
+          status?.value?.confirmationStatus === 'finalized') {
+        if (status.value.err) {
+          return 'failed';
+        }
+        return 'success';
+      }
+    } catch (e) {
+      // 忽略查询错误，继续轮询
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+  
+  return 'timeout';
 }
 
 function printHeader(title: string) {
@@ -82,6 +138,59 @@ function printSuccess(message: string) {
 
 function printError(message: string) {
   console.error(`✗ ${message}`);
+}
+
+/**
+ * 创建 Anchor stake 指令（不需要 IDL 文件）
+ */
+function createStakeInstruction(
+  programId: PublicKey,
+  senderState: PublicKey,
+  user: PublicKey,
+  vault: PublicKey,
+  usdcMint: PublicKey,
+  userTokenAccount: PublicKey,
+  vaultTokenAccount: PublicKey,
+  amount: bigint,
+  receiverAddress: string
+): TransactionInstruction {
+  // Anchor 指令格式：8 字节 discriminator + 参数
+  // stake discriminator: 从 IDL 获取
+  const discriminator = Buffer.from([206, 176, 202, 18, 200, 209, 179, 108]);
+  
+  // 序列化参数：amount (u64) + receiverAddress (String)
+  const amountBuf = Buffer.alloc(8);
+  amountBuf.writeBigUInt64LE(amount);
+  
+  // Borsh String 格式：4字节长度 + 字符串内容
+  const receiverAddressBytes = Buffer.from(receiverAddress, 'utf-8');
+  const receiverAddressLenBuf = Buffer.alloc(4);
+  receiverAddressLenBuf.writeUInt32LE(receiverAddressBytes.length);
+  
+  const instructionData = Buffer.concat([
+    discriminator,
+    amountBuf,
+    receiverAddressLenBuf,
+    receiverAddressBytes
+  ]);
+
+  // 构建账户列表（顺序必须与 Anchor 程序定义一致）
+  const keys = [
+    { pubkey: senderState, isSigner: false, isWritable: true },
+    { pubkey: user, isSigner: true, isWritable: true },
+    { pubkey: vault, isSigner: false, isWritable: false },
+    { pubkey: usdcMint, isSigner: false, isWritable: false },
+    { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+    { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+  ];
+
+  return new TransactionInstruction({
+    keys,
+    programId,
+    data: instructionData,
+  });
 }
 
 // ============ 用户操作：质押 ============
@@ -115,9 +224,6 @@ async function stake(amount?: number, receiver?: string) {
       commitment: 'confirmed',
     });
 
-    // 加载程序（需要 IDL）
-    // const program = new Program<Bridge1024>(IDL, config.programId, provider);
-
     // 推导 PDA 地址
     const [senderState] = PublicKey.findProgramAddressSync(
       [Buffer.from('sender_state')],
@@ -149,42 +255,160 @@ async function stake(amount?: number, receiver?: string) {
     console.log(`  Vault Token Account: ${vaultTokenAccount.toBase58()}`);
     console.log('');
 
+    // 检查用户 token account 是否存在
+    let userTokenAccountExists = false;
+    try {
+      await getAccount(connection, userTokenAccount);
+      userTokenAccountExists = true;
+    } catch (e: any) {
+      if (e.message && e.message.includes('could not find account')) {
+        console.log('⚠️  用户 USDC token account 不存在，将在交易中创建');
+      } else {
+        throw e;
+      }
+    }
+
+    // 检查 USDC 余额
+    if (userTokenAccountExists) {
+      try {
+        const tokenAccountInfo = await getAccount(connection, userTokenAccount);
+        const balance = tokenAccountInfo.amount;
+        
+        if (balance < BigInt(stakeAmount)) {
+          throw new Error(`USDC 余额不足: ${balance} < ${stakeAmount}`);
+        }
+        
+        console.log(`当前 USDC 余额: ${balance.toString()} (最小单位)`);
+      } catch (error: any) {
+        if (!error.message.includes('余额不足')) {
+          throw error;
+        }
+      }
+    }
+
     // 执行 stake
     console.log('执行质押交易...');
     
-    // 实际调用（需要加载 IDL）
-    /*
-    const tx = await program.methods
-      .stake(new BN(stakeAmount), receiverAddress)
-      .accounts({
-        user: userKeypair.publicKey,
-        senderState: senderState,
-        userTokenAccount: userTokenAccount,
-        vaultTokenAccount: vaultTokenAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
+    let signature: string;
+    let blockhash: string;
+    let lastValidBlockHeight: number;
 
-    printSuccess(`交易成功！`);
-    console.log(`  Transaction: ${tx}`);
-    console.log(`  Explorer: https://explorer.solana.com/tx/${tx}?cluster=custom&customUrl=${config.rpcUrl}`);
-    */
+    if (IDL) {
+      // 使用 IDL 和 Anchor Program（推荐方式）
+      console.log('使用 IDL 文件执行交易...');
+      const program = new Program(IDL, provider);
 
-    console.log('⚠️  需要 IDL 文件才能执行实际交易');
+      // 如果用户 token account 不存在，先创建它
+      if (!userTokenAccountExists) {
+        const createATAInstruction = createAssociatedTokenAccountInstruction(
+          userKeypair.publicKey,
+          userTokenAccount,
+          userKeypair.publicKey,
+          config.usdcMint
+        );
+        const createTx = new Transaction().add(createATAInstruction);
+        await sendAndConfirmTransaction(connection, createTx, [userKeypair], { commitment: 'confirmed' });
+        console.log('✓ 用户 USDC token account 已创建');
+      }
+
+      // 构建交易（不立即执行）
+      const transaction = await program.methods
+        .stake(new BN(stakeAmount), receiverAddress)
+        .accounts({
+          senderState: senderState,
+          user: userKeypair.publicKey,
+          vault: vault,
+          usdcMint: config.usdcMint,
+          userTokenAccount: userTokenAccount,
+          vaultTokenAccount: vaultTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .transaction();
+
+      // 获取最新的 blockhash
+      const blockhashResult = await connection.getLatestBlockhash('confirmed');
+      blockhash = blockhashResult.blockhash;
+      lastValidBlockHeight = blockhashResult.lastValidBlockHeight;
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = userKeypair.publicKey;
+
+      // 签名交易
+      transaction.sign(userKeypair);
+
+      // 发送交易（立即返回交易签名，不等待确认）
+      signature = await connection.sendRawTransaction(transaction.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+    } else {
+      // 使用手动构建指令（后备方案）
+      console.log('使用手动构建指令执行交易...');
+      
+      // 构建交易
+      const transaction = new Transaction();
+
+      // 如果用户 token account 不存在，先创建它
+      if (!userTokenAccountExists) {
+        const createATAInstruction = createAssociatedTokenAccountInstruction(
+          userKeypair.publicKey,
+          userTokenAccount,
+          userKeypair.publicKey,
+          config.usdcMint
+        );
+        transaction.add(createATAInstruction);
+      }
+
+      // 创建 stake 指令
+      const stakeInstruction = createStakeInstruction(
+        config.programId,
+        senderState,
+        userKeypair.publicKey,
+        vault,
+        config.usdcMint,
+        userTokenAccount,
+        vaultTokenAccount,
+        BigInt(stakeAmount),
+        receiverAddress
+      );
+      transaction.add(stakeInstruction);
+
+      // 获取最新的 blockhash
+      const blockhashResult = await connection.getLatestBlockhash('confirmed');
+      blockhash = blockhashResult.blockhash;
+      lastValidBlockHeight = blockhashResult.lastValidBlockHeight;
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = userKeypair.publicKey;
+
+      // 签名交易
+      transaction.sign(userKeypair);
+
+      // 发送交易（立即返回交易签名，不等待确认）
+      signature = await connection.sendRawTransaction(transaction.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+    }
+
+    // 立即输出交易ID（在确认之前）
     console.log('');
-    console.log('示例调用代码:');
-    console.log(`
-const tx = await program.methods
-  .stake(new BN(${stakeAmount}), "${receiverAddress}")
-  .accounts({
-    user: userKeypair.publicKey,
-    senderState: senderState,
-    userTokenAccount: userTokenAccount,
-    vaultTokenAccount: vaultTokenAccount,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  })
-  .rpc();
-    `);
+    printSuccess(`交易已发送！`);
+    console.log(`  Transaction Signature: ${signature}`);
+    console.log(`  Explorer: https://explorer.solana.com/tx/${signature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
+    console.log('⏳ 轮询交易状态 (超时: 5秒)...');
+
+    // 使用轮询方式查询交易状态
+    const status = await pollTransactionStatus(connection, signature, 10, 500);
+    
+    if (status === 'success') {
+      console.log('✓ 交易已确认！');
+    } else if (status === 'failed') {
+      console.warn(`⚠️  交易失败`);
+      console.warn(`   签名: ${signature}`);
+    } else {
+      console.warn(`⚠️  交易确认超时 (5秒)`);
+      console.warn(`   交易已发送，签名: ${signature}`);
+      console.warn(`   交易可能仍在处理中，请手动检查状态`);
+    }
 
   } catch (error) {
     printError(`质押失败: ${error}`);

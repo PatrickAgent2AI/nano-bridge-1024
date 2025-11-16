@@ -8,3 +8,5 @@ test-ledger/
 .relayer/
 .cursor/
 .backup_*
+relayer/**/.relayer
+!.env.*.example

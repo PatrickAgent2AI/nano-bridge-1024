@@ -2,6 +2,10 @@ use crate::error::{RelayerError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+fn default_retry_delays() -> Vec<u64> {
+    vec![0, 30000, 60000, 120000, 300000]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub service: ServiceConfig,
@@ -72,10 +76,6 @@ impl Default for QueueConfig {
             retry_delays: default_retry_delays(),
         }
     }
-}
-
-fn default_retry_delays() -> Vec<u64> {
-    vec![0, 30000, 60000, 120000, 300000]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,19 +149,55 @@ impl Config {
     pub fn load() -> Result<Self> {
         // 加载 .env 文件
         dotenvy::dotenv().ok();
+        
+        // 暂时移除数组字段，稍后手动处理
+        let cors_origins_str = std::env::var("API__CORS_ORIGINS").ok();
+        let retry_delays_str = std::env::var("QUEUE__RETRY_DELAYS").ok();
+        
+        if cors_origins_str.is_some() {
+            std::env::remove_var("API__CORS_ORIGINS");
+        }
+        if retry_delays_str.is_some() {
+            std::env::remove_var("QUEUE__RETRY_DELAYS");
+        }
 
         let config = config::Config::builder()
             .add_source(
                 config::Environment::default()
                     .separator("__")
                     .try_parsing(true)
+                    .ignore_empty(true)
             )
             .build()
-            .map_err(|e| RelayerError::Config(e.to_string()))?;
+            .map_err(|e| RelayerError::Config(format!("Failed to build config: {}", e)))?;
 
-        config
+        let mut config: Config = config
             .try_deserialize()
-            .map_err(|e| RelayerError::Config(e.to_string()))
+            .map_err(|e| RelayerError::Config(format!("Failed to deserialize config: {}.\n\nMake sure all required fields are set in your .env file:\n- SOURCE_CHAIN__NAME\n- SOURCE_CHAIN__CHAIN_ID\n- SOURCE_CHAIN__RPC_URL\n- SOURCE_CHAIN__CONTRACT_ADDRESS\n- TARGET_CHAIN__NAME\n- TARGET_CHAIN__CHAIN_ID\n- TARGET_CHAIN__RPC_URL\n- TARGET_CHAIN__CONTRACT_ADDRESS", e)))?;
+        
+        // 手动解析数组字段
+        if let Some(origins_str) = cors_origins_str {
+            if !origins_str.is_empty() {
+                config.api.cors_origins = origins_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+            }
+        }
+        
+        if let Some(delays_str) = retry_delays_str {
+            if !delays_str.is_empty() {
+                config.queue.retry_delays = delays_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u64>().ok())
+                    .collect();
+                if config.queue.retry_delays.is_empty() {
+                    config.queue.retry_delays = default_retry_delays();
+                }
+            }
+        }
+        
+        Ok(config)
     }
 
     /// 验证配置

@@ -37,7 +37,10 @@
 **说明：**
 - 部署 Bridge1024 程序到 1024Chain 测试网
 - 自动编译和部署合约
-- 将程序 ID 保存到 `.env.svm.deploy` 文件中
+- **支持两种部署模式**：
+  - **升级部署**：使用现有 Program ID 升级合约（默认）
+  - **全新部署**：生成新的 Program ID 并部署（会自动备份旧密钥对）
+- 将程序 ID 保存到 `.env.svm.deploy` 和 `.env.invoke` 文件中
 
 **配置文件：** `.env.svm.deploy`
 
@@ -45,9 +48,17 @@
 - `SVM_RPC_URL`: SVM RPC 地址
 - `SVM_KEYPAIR_PATH`: 管理员密钥文件路径
 
+**交互式选择：**
+如果检测到已存在的程序密钥对，会提示：
+1. 使用现有程序ID（升级部署）
+2. 生成新的程序ID（全新部署，自动备份旧密钥对）
+
 **输出：**
 - `SVM_PROGRAM_ID`: 部署的程序 ID
 - `SVM_ADMIN_ADDRESS`: 管理员地址
+
+**备份机制：**
+选择全新部署时，旧密钥对会自动备份到 `.backup_YYYYMMDD_HHMMSS/` 目录
 
 ---
 
@@ -93,6 +104,28 @@ SVM_CHAIN_ID=91024
 2. 配置 EVM 合约的对端地址（SVM 程序 ID）
 3. 配置 SVM 合约的 USDC Mint
 4. 配置 SVM 合约的对端地址（EVM 合约地址）
+
+---
+
+### 步骤 4: 注册 Relayer（可选）
+
+```bash
+./04-register-relayer.sh
+```
+
+**说明：**
+- 自动生成 E2S 和 S2E Relayer 的密钥对
+- 将 E2S Relayer（Ed25519）注册到 SVM 合约
+- 将 S2E Relayer（ECDSA）注册到 EVM 合约
+- 更新 relayer 配置文件中的私钥
+
+**交互式流程：**
+- 如果密钥对已存在，会询问是否覆盖
+- 自动执行注册到两条链的操作
+
+**输出：**
+- E2S Relayer 公钥和私钥（保存到 `.relayer/e2s-relayer.env`）
+- S2E Relayer 地址和私钥（保存到 `.relayer/s2e-relayer.env`）
 
 ---
 
@@ -151,15 +184,46 @@ npx ts-node svm-admin.ts withdraw_liquidity <amount>
 
 ---
 
-## 其他脚本
+## 用户操作脚本
 
-### 部署 Mock USDC (仅测试网)
-
-如果在测试网上需要部署 Mock USDC 代币：
+### EVM 用户操作
 
 ```bash
-./deploy-mock-usdc.sh
+# 质押 USDC（从 EVM 到 SVM）
+npx ts-node evm-user.ts stake [amount] [receiver_address]
+
+# 查询余额
+npx ts-node evm-user.ts balance
+
+# 查询合约状态
+npx ts-node evm-user.ts state
 ```
+
+### SVM 用户操作
+
+```bash
+# 质押 USDC（从 SVM 到 EVM）
+npx ts-node svm-user.ts stake [amount] [receiver_address]
+
+# 查询余额
+npx ts-node svm-user.ts balance
+```
+
+---
+
+## 测试脚本
+
+### 端到端跨链测试
+
+```bash
+# EVM → SVM 跨链测试
+npx ts-node cross-chain-test.ts
+
+# SVM → EVM 跨链测试
+npx ts-node cross-chain-test-s2e.ts
+```
+
+这些测试脚本会自动执行完整的跨链流程：质押 → 等待 relayer 处理 → 验证接收端余额变化。
 
 ---
 
@@ -195,6 +259,7 @@ npx ts-node svm-admin.ts withdraw_liquidity <amount>
 
 # 2. 部署 SVM 合约
 ./02-deploy-svm.sh
+# 如果已有程序，选择：1=升级部署, 2=全新部署
 
 # 3. 准备配置文件（只需配置 USDC 地址）
 cp .env.config-usdc-peer.example .env.config-usdc-peer
@@ -205,14 +270,18 @@ vim .env.config-usdc-peer  # 只需填写 USDC_EVM_CONTRACT 和 USDC_SVM_MINT
 
 # 5. 验证配置
 npx ts-node evm-admin.ts query_state
+npx ts-node svm-admin.ts query_state
 
-# 6. 添加 Relayer（可选）
-npx ts-node evm-admin.ts add_relayer <relayer_address>
-npx ts-node svm-admin.ts add_relayer <relayer_pubkey>
+# 6. 注册 Relayer（自动生成密钥并注册）
+./04-register-relayer.sh
 
-# 7. 添加流动性（可选）
-npx ts-node evm-admin.ts add_liquidity 1000000000
-npx ts-node svm-admin.ts add_liquidity 1000000000
+# 7. 添加流动性
+npx ts-node evm-admin.ts add_liquidity 100000000
+npx ts-node svm-admin.ts add_liquidity 100000000
+
+# 8. 测试跨链转账
+npx ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
+npx ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
 ```
 
 ---

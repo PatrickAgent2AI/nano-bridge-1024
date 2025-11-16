@@ -133,16 +133,39 @@ impl EvmSubmitter {
     }
 
     /// 解析字符串为 bytes32
+    /// 支持 hex 格式（0x...）和 Solana base58 格式
     fn parse_bytes32(&self, s: &str) -> Result<[u8; 32]> {
-        let s = s.strip_prefix("0x").unwrap_or(s);
-        let bytes = hex::decode(s)?;
-        
-        if bytes.len() > 32 {
-            return Err(anyhow!("Bytes too long: {} > 32", bytes.len()));
+        // 如果是 hex 格式
+        if let Some(hex_str) = s.strip_prefix("0x") {
+            let bytes = hex::decode(hex_str)?;
+            
+            if bytes.len() > 32 {
+                return Err(anyhow!("Bytes too long: {} > 32", bytes.len()));
+            }
+            
+            let mut result = [0u8; 32];
+            result[..bytes.len()].copy_from_slice(&bytes);
+            return Ok(result);
         }
         
-        let mut result = [0u8; 32];
-        result[..bytes.len()].copy_from_slice(&bytes);
-        Ok(result)
+        // 尝试解析为 Solana base58 格式（Pubkey）
+        match bs58::decode(s).into_vec() {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut result = [0u8; 32];
+                result.copy_from_slice(&bytes);
+                Ok(result)
+            }
+            Ok(bytes) => Err(anyhow!("Invalid Solana pubkey length: {}", bytes.len())),
+            Err(_) => {
+                // 最后尝试作为hex解析（无0x前缀）
+                let bytes = hex::decode(s)?;
+                if bytes.len() > 32 {
+                    return Err(anyhow!("Bytes too long: {} > 32", bytes.len()));
+                }
+                let mut result = [0u8; 32];
+                result[..bytes.len()].copy_from_slice(&bytes);
+                Ok(result)
+            }
+        }
     }
 }

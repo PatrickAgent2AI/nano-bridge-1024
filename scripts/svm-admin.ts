@@ -905,7 +905,10 @@ async function main() {
 
 // 运行主程序
 if (require.main === module) {
-  main();
+  main().catch(error => {
+    console.error('未处理的错误:', error);
+    process.exit(1);
+  });
 }
 
 export {

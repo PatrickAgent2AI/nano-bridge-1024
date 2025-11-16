@@ -33,20 +33,25 @@ async fn main() -> Result<()> {
     check_balances(&config).await?;
     info!("Balance check passed");
 
-    // 启动 HTTP API 服务器
-    let api_handle = tokio::spawn(api::start_server(config.clone()));
+    // 启动 HTTP API 服务器（不阻塞主流程）
+    let api_config = config.clone();
+    tokio::spawn(async move {
+        match api::start_server(api_config).await {
+            Ok(_) => info!("API server stopped gracefully"),
+            Err(e) => tracing::error!("API server error: {}", e),
+        }
+    });
     info!(port = config.api.port, "HTTP API server started");
 
-    // 启动事件监听器
-    let listener_handle = tokio::spawn(listener::start_listener(config.clone()));
+    // 启动事件监听器（主要服务）
     info!("Event listener started");
 
-    // 等待服务
+    // 等待服务（只等待 listener 和 Ctrl-C）
     tokio::select! {
-        _ = api_handle => {
-            info!("API server stopped");
-        }
-        _ = listener_handle => {
+        result = listener::start_listener(config) => {
+            if let Err(e) = result {
+                tracing::error!("Event listener returned error: {}", e);
+            }
             info!("Event listener stopped");
         }
         _ = tokio::signal::ctrl_c() => {
@@ -58,22 +63,11 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn check_balances(config: &config::S2EConfig) -> Result<()> {
-    use shared::gas::GasManager;
-    
-    let gas_manager = GasManager::new(
-        config.gas.min_svm_balance,
-        config.gas.min_evm_balance,
-        config.gas.balance_check_interval,
-    );
-
+async fn check_balances(_config: &config::S2EConfig) -> Result<()> {
     // TODO: 实现实际的余额查询
     // let svm_balance = get_svm_balance(&config).await?;
     // let evm_balance = get_evm_balance(&config).await?;
     
-    // gas_manager.check_svm_balance(svm_balance)?;
-    // gas_manager.check_evm_balance(evm_balance)?;
-
     info!("Balance check: SVM and EVM balances sufficient (check implementation pending)");
     Ok(())
 }

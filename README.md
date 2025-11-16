@@ -6,9 +6,42 @@
 
 ## 开发状态
 
-**当前阶段：** M4 - Relayer 服务开发（技术选型和测试框架设计完成 ✅）
+**当前阶段：** M4 - Relayer 服务开发（**S2E Relayer 完整实现并验证成功** ✅）
 
-**最新进展（2025-11-15）：**
+**最新进展（2025-11-16）：**
+- ✅ **Scripts 目录清理和优化** ⭐
+  - ✅ 删除 6 个临时/重复脚本（check-request-status.ts, check-transaction.ts, remove-relayer.ts, init-svm-fresh.sh, redeploy-svm.sh, start-relayer.sh）
+  - ✅ 增强 `02-deploy-svm.sh`：支持升级部署/全新部署选择、自动备份旧密钥对、生成新 Program ID
+  - ✅ 脚本数量从 16 个精简到 10 个核心脚本
+  - ✅ 保留完整的部署→配置→管理→用户操作流程
+- ✅ **S2E Relayer (SVM→EVM) 完整实现并测试通过** ⭐⭐⭐
+  - ✅ SVM 事件监听器（Solana RPC HTTP API 轮询）
+  - ✅ 事件解析（base64 + Borsh 反序列化）
+  - ✅ ECDSA 签名生成（SHA-256 + EIP-191 + secp256k1）
+  - ✅ EVM 交易提交（ethers-rs）
+  - ✅ Solana base58 地址支持
+  - ✅ 状态追踪（避免重复处理）
+  - ✅ HTTP API 服务（端口 8081）
+  - ✅ **端到端测试验证成功**：
+    - SVM Stake (1000 单位) → 事件捕获 → ECDSA 签名 → EVM 提交 → USDC 余额增加 (+0.001 USDC) ✅
+    - 交易哈希: `0xcdad383798c88e3f8464d207b821feced89e90ddbc63ba6f49fa09b6d9d346ec`
+- ✅ **E2S Relayer (EVM→SVM) 完整实现并运行** ⭐⭐⭐
+  - ✅ **分离式架构**（解决 Rust 依赖冲突）
+    - `e2s-listener`：监听 EVM 事件 → 保存到文件队列
+    - `e2s-submitter`：从队列读取 → Ed25519 签名 → 提交到 SVM
+  - ✅ EVM 事件监听器（ethers event filter）
+  - ✅ 事件解析（StakeEvent ABI 解码）
+  - ✅ 文件系统队列（`.relayer/queue/event_{nonce}.json`）
+  - ✅ Ed25519 签名器（Borsh 序列化 + Ed25519）
+  - ✅ SVM 交易提交器（包含 Ed25519Program 预验证指令）
+  - ✅ HTTP API 服务（端口 8082）
+  - ✅ 服务已运行并监听事件
+- ✅ **SVM 用户脚本优化**
+  - ✅ 添加 5 秒超时配置
+  - ✅ 实现交易状态轮询（替代 confirmTransaction）
+  - ✅ 立即返回交易签名
+
+**之前完成（2025-11-15）：**
 - ✅ **EVM 合约重构完成（v2.0）** ⭐
   - ✅ **合约本身作为金库**：简化架构，提高安全性
   - ✅ 无需外部 vault 地址和 approve 操作
@@ -88,70 +121,51 @@
 
 ## 快速开始
 
-### 1. 部署合约
+### 前置条件
 
-#### EVM 合约（Arbitrum Sepolia）
-
+**EVM 工具链：**
 ```bash
-# 前置条件：安装 Foundry
+# 安装 Foundry
 curl -L https://foundry.paradigm.xyz | bash && foundryup
-
-# 配置环境变量
-cd scripts
-cp ../.env.example ../.env
-# 编辑 .env 文件，填写 ADMIN_EVM_PRIVATE_KEY 等必要配置
-
-# 部署合约（自动编译、部署、初始化）
-./deploy-evm.sh
-
-# （可选）部署测试用 MockUSDC
-./deploy-mock-usdc.sh
 ```
 
-#### SVM 合约（1024chain Testnet）
-
+**SVM 工具链：**
 ```bash
-# 前置条件：安装 Anchor 和 Solana CLI
+# 安装 Anchor 和 Solana CLI
 cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
 sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
-
-# 配置钱包（如果还没有）
 solana-keygen new -o ~/.config/solana/id.json
-
-# 部署合约（自动编译和部署）
-cd scripts
-./deploy-svm.sh
 ```
 
-详细说明见 [scripts/README.md](scripts/README.md#部署脚本)
-
-### 2. 配置合约
+### 一键部署流程
 
 ```bash
 cd scripts
 
-# EVM 端配置
-ts-node evm-admin.ts configure_usdc     # 配置 USDC 地址
-ts-node evm-admin.ts configure_peer     # 配置对端合约
-ts-node evm-admin.ts add_relayer        # 添加 relayers
-ts-node evm-admin.ts add_liquidity      # 增加流动性
+# 1. 部署 EVM 合约
+./01-deploy-evm.sh
 
-# SVM 端配置（类似）
-ts-node svm-admin.ts configure_usdc
-ts-node svm-admin.ts configure_peer
-ts-node svm-admin.ts add_relayer
-ts-node svm-admin.ts add_liquidity
+# 2. 部署 SVM 合约（选择升级或全新部署）
+./02-deploy-svm.sh
+
+# 3. 配置 USDC 和对端地址
+cp .env.config-usdc-peer.example .env.config-usdc-peer
+vim .env.config-usdc-peer  # 填写 USDC 地址
+./03-config-usdc-peer.sh
+
+# 4. 注册 Relayer（自动生成密钥）
+./04-register-relayer.sh
+
+# 5. 添加流动性
+npx ts-node evm-admin.ts add_liquidity 100000000
+npx ts-node svm-admin.ts add_liquidity 100000000
+
+# 6. 测试跨链转账
+npx ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
+npx ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
 ```
 
-### 3. 用户跨链转账
-
-```bash
-# 从 EVM 到 SVM
-ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
-
-# 从 SVM 到 EVM
-ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
-```
+详细说明见 [scripts/README.md](scripts/README.md)
 
 ## 使用方法
 
@@ -188,26 +202,40 @@ ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
 ### 中继服务
 
 - **relayer/**：中继服务器（Rust 实现 🦀）
-  - **双服务架构**：s2e (SVM→EVM) 和 e2s (EVM→SVM) 独立进程
-  - **s2e 服务**：监听 1024chain 事件 → ECDSA 签名 → 提交到 Arbitrum
-  - **e2s 服务**：监听 Arbitrum 事件 → Ed25519 签名 → 提交到 1024chain
-  - **HTTP API**：暴露健康检查、状态查询、任务队列等接口
-  - **高性能架构**：Tokio 异步运行时 + Redis 任务队列 + Worker Pool
+  - **s2e 服务** (SVM→EVM)：✅ **完整实现并验证**
+    - 单一进程架构
+    - 监听 1024chain 事件（HTTP RPC 轮询）
+    - ECDSA 签名（SHA-256 + EIP-191）
+    - 提交到 Arbitrum
+    - HTTP API（端口 8081）
+    - 详细说明：[relayer/README_S2E.md](relayer/README_S2E.md)
+  - **e2s 服务** (EVM→SVM)：✅ **完整实现并运行**
+    - 分离式架构（解决依赖冲突）
+    - `e2s-listener`：监听 Arbitrum 事件 → 文件队列
+    - `e2s-submitter`：队列处理 → Ed25519 签名 → 提交到 1024chain
+    - HTTP API（端口 8082）
+    - 详细说明：[relayer/README_E2S.md](relayer/README_E2S.md)
+  - **HTTP API**：健康检查、状态查询、Prometheus 指标
+  - **高性能架构**：Tokio 异步运行时 + 文件队列（e2s）/ 内存队列（s2e）
   - 详细设计见 [relayer/README.md](relayer/README.md)
 
 ### 部署和运维脚本
 
-- **scripts/**：部署和操作脚本（TypeScript + Shell）
+- **scripts/**：部署和操作脚本（TypeScript + Shell）- **已精简至 10 个核心脚本**
   - **部署脚本**：
-    - `deploy-evm.sh`：自动化部署 EVM 合约到 Arbitrum Sepolia
-    - `deploy-svm.sh`：自动化部署 SVM 合约到 1024chain Testnet
-    - `deploy-mock-usdc.sh`：部署测试用 MockUSDC 合约
-  - **管理员脚本**：
-    - `evm-admin.ts`：EVM 合约管理操作（初始化、配置、流动性管理）
-    - `svm-admin.ts`：SVM 合约管理操作
+    - `01-deploy-evm.sh`：自动化部署 EVM 合约到 Arbitrum Sepolia
+    - `02-deploy-svm.sh`：自动化部署 SVM 合约到 1024chain（支持升级/全新部署）
+    - `03-config-usdc-peer.sh`：配置 USDC 地址和对端合约地址
+    - `04-register-relayer.sh`：自动生成并注册 Relayer 密钥对
+  - **管理脚本**：
+    - `evm-admin.ts`：EVM 合约管理操作（查询状态、配置、relayer 管理、流动性管理）
+    - `svm-admin.ts`：SVM 合约管理操作（查询状态、配置、relayer 管理、流动性管理）
   - **用户脚本**：
-    - `evm-user.ts`：EVM 用户操作（质押、查询余额）
-    - `svm-user.ts`：SVM 用户操作
+    - `evm-user.ts`：EVM 用户操作（质押 USDC、查询余额）
+    - `svm-user.ts`：SVM 用户操作（质押 USDC、查询余额）
+  - **测试脚本**：
+    - `cross-chain-test.ts`：EVM→SVM 端到端测试
+    - `cross-chain-test-s2e.ts`：SVM→EVM 端到端测试
   - 详细文档见 [scripts/README.md](scripts/README.md)
 
 ### 文档

@@ -1,132 +1,140 @@
 #!/bin/bash
 
 # ============================================
-# E2S Relayer 注册脚本
+# Relayer 注册脚本 (E2S + S2E)
 # ============================================
 # 功能：
-# 1. 生成 Ed25519 密钥对（用于 SVM 签名和交易）
-# 2. 注册到 SVM 链（接收链）
-# 3. 保存密钥到配置文件
+# 1. 生成 Ed25519 密钥对（用于 E2S Relayer - SVM 签名和交易）
+# 2. 注册 E2S Relayer 到 SVM 链（接收链）
+# 3. 生成 ECDSA 密钥对（用于 S2E Relayer - EVM 签名和交易）
+# 4. 注册 S2E Relayer 到 EVM 合约（接收链）
+# 5. 保存密钥到配置文件
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-echo "============================================"
-echo "E2S Relayer 注册脚本"
-echo "============================================"
-echo ""
-
 # 加载环境变量
-if [ -f "$PROJECT_ROOT/.env.invoke" ]; then
-    source "$PROJECT_ROOT/.env.invoke"
-else
+if [ ! -f "$PROJECT_ROOT/.env.invoke" ]; then
     echo "❌ 未找到 .env.invoke 文件"
     exit 1
 fi
+source "$PROJECT_ROOT/.env.invoke"
 
-# 1. 生成 Solana (Ed25519) 密钥对
-echo "📝 生成 Ed25519 密钥对 (用于 SVM)..."
+# E2S Relayer
 RELAYER_KEYPAIR_PATH="$PROJECT_ROOT/.relayer/e2s-relayer-keypair.json"
 mkdir -p "$PROJECT_ROOT/.relayer"
 
 if [ -f "$RELAYER_KEYPAIR_PATH" ]; then
-    echo "⚠️  密钥文件已存在: $RELAYER_KEYPAIR_PATH"
-    read -p "是否覆盖? (y/n) " -n 1 -r
+    read -p "密钥文件已存在，是否覆盖? (y/n) " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "使用现有密钥"
-    else
-        solana-keygen new --no-bip39-passphrase --outfile "$RELAYER_KEYPAIR_PATH" --force
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        solana-keygen new --no-bip39-passphrase --outfile "$RELAYER_KEYPAIR_PATH" --force > /dev/null 2>&1
     fi
 else
-    solana-keygen new --no-bip39-passphrase --outfile "$RELAYER_KEYPAIR_PATH"
+    solana-keygen new --no-bip39-passphrase --outfile "$RELAYER_KEYPAIR_PATH" > /dev/null 2>&1
 fi
 
 RELAYER_PUBKEY=$(solana-keygen pubkey "$RELAYER_KEYPAIR_PATH")
-echo "✓ Relayer 公钥: $RELAYER_PUBKEY"
 
-# 2. 注册 relayer 到 SVM 链
-echo ""
-echo "🔗 注册 relayer 到 SVM 链 (接收链)..."
 cd "$SCRIPT_DIR"
-
-# 使用 svm-admin.ts 添加 relayer
-npx ts-node svm-admin.ts add_relayer "$RELAYER_PUBKEY" || {
-    echo "⚠️  SVM 注册失败"
-    echo "请手动执行: npx ts-node svm-admin.ts add_relayer $RELAYER_PUBKEY"
+npx ts-node svm-admin.ts add_relayer "$RELAYER_PUBKEY" > /dev/null 2>&1 || {
+    echo "⚠️  SVM 注册失败: npx ts-node svm-admin.ts add_relayer $RELAYER_PUBKEY"
 }
 
-# 3. 生成 relayer 配置文件
-echo ""
-echo "📄 生成 relayer 配置文件..."
+E2S_ENV_PATH="$PROJECT_ROOT/relayer/e2s-submitter/.env"
+if [ ! -f "$E2S_ENV_PATH" ]; then
+    echo "⚠️  文件不存在: $E2S_ENV_PATH"
+    exit 1
+fi
 
-RELAYER_CONFIG_PATH="$PROJECT_ROOT/.relayer/e2s-relayer.env"
-
-# 读取 SVM keypair 并转换为十六进制私钥
 RELAYER_ED25519_PRIVATE_KEY=$(node -e "
 const fs = require('fs');
 const keypair = JSON.parse(fs.readFileSync('$RELAYER_KEYPAIR_PATH', 'utf-8'));
-const secretKey = Buffer.from(keypair.slice(0, 32));
-console.log(secretKey.toString('hex'));
+const secretKey = keypair.slice(0, 32);
+console.log(secretKey.join(','));
 ")
 
-cat > "$RELAYER_CONFIG_PATH" << EOF
-# ============================================
-# E2S Relayer 配置文件
-# ============================================
-# 自动生成于 $(date)
+if grep -q "^RELAYER__ED25519_PRIVATE_KEY=" "$E2S_ENV_PATH"; then
+    sed -i "s|^RELAYER__ED25519_PRIVATE_KEY=.*|RELAYER__ED25519_PRIVATE_KEY=$RELAYER_ED25519_PRIVATE_KEY|" "$E2S_ENV_PATH"
+else
+    echo "RELAYER__ED25519_PRIVATE_KEY=$RELAYER_ED25519_PRIVATE_KEY" >> "$E2S_ENV_PATH"
+fi
 
-# Service Configuration
-SERVICE__NAME=e2s
-SERVICE__VERSION=0.1.0
+# S2E Relayer
+S2E_KEY_PATH="$PROJECT_ROOT/.relayer/s2e-relayer-key.json"
 
-# Source Chain Configuration (EVM - Arbitrum Sepolia)
-SOURCE_CHAIN__NAME=Arbitrum Sepolia
-SOURCE_CHAIN__CHAIN_ID=$EVM_CHAIN_ID
-SOURCE_CHAIN__RPC_URL=$EVM_RPC_URL
-SOURCE_CHAIN__CONTRACT_ADDRESS=$EVM_CONTRACT_ADDRESS
+if [ -f "$S2E_KEY_PATH" ]; then
+    read -p "密钥文件已存在，是否覆盖? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        S2E_PRIVATE_KEY=$(node -e "
+        const fs = require('fs');
+        const key = JSON.parse(fs.readFileSync('$S2E_KEY_PATH', 'utf-8'));
+        console.log(key.privateKey);
+        ")
+        S2E_ADDRESS=$(node -e "
+        const fs = require('fs');
+        const key = JSON.parse(fs.readFileSync('$S2E_KEY_PATH', 'utf-8'));
+        console.log(key.address);
+        ")
+    else
+        cd "$SCRIPT_DIR"
+        S2E_KEY_INFO=$(node -e "
+        const { ethers } = require('ethers');
+        const wallet = ethers.Wallet.createRandom();
+        console.log(JSON.stringify({
+            privateKey: wallet.privateKey,
+            address: wallet.address
+        }));
+        ")
+        echo "$S2E_KEY_INFO" > "$S2E_KEY_PATH"
+        S2E_PRIVATE_KEY=$(echo "$S2E_KEY_INFO" | node -e "const data = JSON.parse(require('fs').readFileSync(0, 'utf-8')); console.log(data.privateKey);")
+        S2E_ADDRESS=$(echo "$S2E_KEY_INFO" | node -e "const data = JSON.parse(require('fs').readFileSync(0, 'utf-8')); console.log(data.address);")
+    fi
+else
+    cd "$SCRIPT_DIR"
+    S2E_KEY_INFO=$(node -e "
+    const { ethers } = require('ethers');
+    const wallet = ethers.Wallet.createRandom();
+    console.log(JSON.stringify({
+        privateKey: wallet.privateKey,
+        address: wallet.address
+    }));
+    ")
+    echo "$S2E_KEY_INFO" > "$S2E_KEY_PATH"
+    S2E_PRIVATE_KEY=$(echo "$S2E_KEY_INFO" | node -e "const data = JSON.parse(require('fs').readFileSync(0, 'utf-8')); console.log(data.privateKey);")
+    S2E_ADDRESS=$(echo "$S2E_KEY_INFO" | node -e "const data = JSON.parse(require('fs').readFileSync(0, 'utf-8')); console.log(data.address);")
+fi
 
-# Target Chain Configuration (SVM - 1024chain)
-TARGET_CHAIN__NAME=1024chain
-TARGET_CHAIN__CHAIN_ID=$SVM_CHAIN_ID
-TARGET_CHAIN__RPC_URL=$SVM_RPC_URL
-TARGET_CHAIN__CONTRACT_ADDRESS=$SVM_PROGRAM_ID
+# 验证变量是否成功提取
+if [ -z "$S2E_PRIVATE_KEY" ] || [ -z "$S2E_ADDRESS" ]; then
+    echo "❌ 错误: 未能提取 S2E 密钥信息"
+    echo "S2E_PRIVATE_KEY: ${S2E_PRIVATE_KEY:-未定义}"
+    echo "S2E_ADDRESS: ${S2E_ADDRESS:-未定义}"
+    exit 1
+fi
 
-# Relayer Keys
-# Ed25519 私钥（十六进制格式，32字节，用于 SVM 签名和交易）
-RELAYER__ED25519_PRIVATE_KEY=$RELAYER_ED25519_PRIVATE_KEY
+cd "$SCRIPT_DIR"
+npx ts-node evm-admin.ts add_relayer "$S2E_ADDRESS" > /dev/null 2>&1 || {
+    echo "⚠️  EVM 注册失败: npx ts-node evm-admin.ts add_relayer $S2E_ADDRESS"
+}
 
-# Relayer Address
-RELAYER__SVM_PUBKEY=$RELAYER_PUBKEY
+S2E_ENV_PATH="$PROJECT_ROOT/relayer/s2e/.env"
+if [ ! -f "$S2E_ENV_PATH" ]; then
+    echo "⚠️  文件不存在: $S2E_ENV_PATH"
+    exit 1
+fi
 
-# API Configuration
-API__PORT=8082
+# 更新环境变量
+if grep -q "^RELAYER__ECDSA_PRIVATE_KEY=" "$S2E_ENV_PATH"; then
+    # 使用 awk 更安全地替换，避免 sed 特殊字符问题
+    awk -v key="$S2E_PRIVATE_KEY" '/^RELAYER__ECDSA_PRIVATE_KEY=/ { print "RELAYER__ECDSA_PRIVATE_KEY=" key; next }1' "$S2E_ENV_PATH" > "$S2E_ENV_PATH.tmp" && mv "$S2E_ENV_PATH.tmp" "$S2E_ENV_PATH"
+else
+    echo "RELAYER__ECDSA_PRIVATE_KEY=$S2E_PRIVATE_KEY" >> "$S2E_ENV_PATH"
+fi
 
-# Logging Configuration
-LOGGING__LEVEL=info
-LOGGING__FORMAT=json
-EOF
-
-echo "✓ 配置文件已生成: $RELAYER_CONFIG_PATH"
-
-# 4. 显示摘要
-echo ""
-echo "============================================"
-echo "✅ E2S Relayer 注册完成"
-echo "============================================"
-echo ""
-echo "Relayer 公钥: $RELAYER_PUBKEY"
-echo "密钥文件: $RELAYER_KEYPAIR_PATH"
-echo "配置文件: $RELAYER_CONFIG_PATH"
-echo ""
-echo "说明："
-echo "  - E2S Relayer 监听 EVM 事件，提交签名到 SVM"
-echo "  - 只需要 Ed25519 密钥对（用于 SVM 操作）"
-echo "  - 已注册到 SVM 链的 relayer 白名单"
-echo ""
-echo "启动 relayer 命令:"
-echo "  cd relayer/e2s-listener"
-echo "  cargo run --release"
-echo ""
+# 结果
+echo "E2S: $RELAYER_PUBKEY -> $E2S_ENV_PATH"
+echo "S2E: $S2E_ADDRESS -> $S2E_ENV_PATH"

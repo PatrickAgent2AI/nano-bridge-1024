@@ -16,6 +16,7 @@
 import { ethers } from 'ethers';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import * as bs58 from 'bs58';
 
 // 加载环境变量
 dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
@@ -29,8 +30,6 @@ const BRIDGE_ABI = [
   'function configurePeer(bytes32 peerContract, uint64 sourceChainId, uint64 targetChainId) external',
   'function addRelayer(address relayerAddress) external',
   'function removeRelayer(address relayerAddress) external',
-  'function addLiquidity(uint256 amount) external',
-  'function withdrawLiquidity(uint256 amount) external',
   
   // View functions
   'function senderState() external view returns (address vault, address admin, address usdcContract, uint64 nonce, bytes32 targetContract, uint64 sourceChainId, uint64 targetChainId)',
@@ -41,6 +40,7 @@ const BRIDGE_ABI = [
 const ERC20_ABI = [
   'function approve(address spender, uint256 amount) external returns (bool)',
   'function balanceOf(address account) external view returns (uint256)',
+  'function transfer(address to, uint256 amount) external returns (bool)',
 ];
 
 // ============ 配置 ============
@@ -160,7 +160,7 @@ async function configureUsdc() {
   }
 }
 
-async function configurePeer() {
+async function configurePeer(peerContract?: string, sourceChainId?: string, targetChainId?: string) {
   printHeader('配置对端合约 (Configure Peer)');
 
   const config = loadConfig();
@@ -168,11 +168,16 @@ async function configurePeer() {
   const wallet = new ethers.Wallet(config.adminPrivateKey, provider);
   const bridge = new ethers.Contract(config.contractAddress, BRIDGE_ABI, wallet);
 
+  // 使用命令行参数或环境变量
+  const peer = peerContract || config.peerContract;
+  const srcChainId = sourceChainId ? parseInt(sourceChainId) : config.sourceChainId;
+  const tgtChainId = targetChainId ? parseInt(targetChainId) : config.targetChainId;
+
   console.log('配置信息:');
   console.log(`  Admin: ${wallet.address}`);
-  console.log(`  Peer Contract: ${config.peerContract}`);
-  console.log(`  Source Chain ID: ${config.sourceChainId}`);
-  console.log(`  Target Chain ID: ${config.targetChainId}`);
+  console.log(`  Peer Contract: ${peer}`);
+  console.log(`  Source Chain ID: ${srcChainId}`);
+  console.log(`  Target Chain ID: ${tgtChainId}`);
   console.log('');
 
   try {
@@ -181,24 +186,24 @@ async function configurePeer() {
     // Convert peer contract to bytes32 format
     // Support both EVM addresses (0x...) and Solana addresses (base58)
     let peerContractBytes32: string;
-    if (config.peerContract.startsWith('0x')) {
+    if (peer.startsWith('0x')) {
       // EVM address: pad to 32 bytes
-      peerContractBytes32 = ethers.zeroPadValue(config.peerContract, 32);
+      peerContractBytes32 = ethers.zeroPadValue(peer, 32);
     } else {
-      // Assume it's a base58 Solana address - convert to bytes32
-      // For now, we'll just pad the hex representation
-      // In production, you'd want to properly decode base58
-      const buffer = Buffer.from(config.peerContract, 'utf-8');
-      const hex = '0x' + buffer.toString('hex').padEnd(64, '0');
-      peerContractBytes32 = hex.slice(0, 66); // Take first 32 bytes
+      // Solana base58 address - decode to bytes32
+      const decoded = bs58.decode(peer);
+      if (decoded.length !== 32) {
+        throw new Error(`Invalid Solana address: expected 32 bytes, got ${decoded.length}`);
+      }
+      peerContractBytes32 = '0x' + Buffer.from(decoded).toString('hex');
     }
     
     console.log(`  Peer Contract (bytes32): ${peerContractBytes32}`);
     
     const tx = await bridge.configurePeer(
       peerContractBytes32,
-      config.sourceChainId,
-      config.targetChainId
+      srcChainId,
+      tgtChainId
     );
     await waitForTx(tx, '对端合约配置成功！');
     
@@ -290,17 +295,12 @@ async function addLiquidity(amount?: string) {
   console.log('');
 
   try {
-    // 1. 批准 USDC
-    console.log('步骤 1: 批准 USDC...');
-    const approveTx = await usdc.approve(config.contractAddress, liquidityAmount);
-    await waitForTx(approveTx, 'USDC 批准成功！');
-
-    // 2. 添加流动性
-    console.log('步骤 2: 添加流动性...');
-    const addTx = await bridge.addLiquidity(liquidityAmount);
-    await waitForTx(addTx, '流动性添加成功！');
+    // 直接转账 USDC 到合约地址（合约作为 vault）
+    console.log('转账 USDC 到合约地址...');
+    const transferTx = await usdc.transfer(config.contractAddress, liquidityAmount);
+    await waitForTx(transferTx, '流动性添加成功！');
     
-    console.log(`Explorer: https://sepolia.arbiscan.io/tx/${addTx.hash}`);
+    console.log(`Explorer: https://sepolia.arbiscan.io/tx/${transferTx.hash}`);
 
   } catch (error: any) {
     printError(`添加流动性失败: ${error.message}`);
@@ -315,19 +315,29 @@ async function withdrawLiquidity(amount: string) {
   const config = loadConfig();
   const provider = new ethers.JsonRpcProvider(config.rpcUrl);
   const wallet = new ethers.Wallet(config.adminPrivateKey, provider);
-  const bridge = new ethers.Contract(config.contractAddress, BRIDGE_ABI, wallet);
+  const usdc = new ethers.Contract(config.usdcContract, ERC20_ABI, provider);
 
   console.log('配置信息:');
   console.log(`  Admin: ${wallet.address}`);
+  console.log(`  Contract: ${config.contractAddress}`);
   console.log(`  Amount: ${amount}`);
   console.log('');
 
   try {
-    console.log('执行提取流动性...');
-    const tx = await bridge.withdrawLiquidity(amount);
-    await waitForTx(tx, '流动性提取成功！');
+    // 注意：提取流动性需要合约有 withdrawLiquidity 函数
+    // 如果合约没有该函数，需要合约管理员通过其他方式提取
+    // 或者需要先在合约中添加该函数
+    printError('⚠️  提取流动性功能需要合约支持 withdrawLiquidity 函数');
+    printError('当前合约中没有该函数，无法直接提取');
+    printError('如果需要提取，需要：');
+    printError('  1. 在合约中添加 withdrawLiquidity 函数');
+    printError('  2. 或者通过其他方式（如多签）从合约地址提取代币');
     
-    console.log(`Explorer: https://sepolia.arbiscan.io/tx/${tx.hash}`);
+    // 检查合约余额
+    const contractBalance = await usdc.balanceOf(config.contractAddress);
+    console.log(`\n合约 USDC 余额: ${contractBalance.toString()}`);
+    
+    throw new Error('合约不支持提取流动性功能');
 
   } catch (error: any) {
     printError(`提取流动性失败: ${error.message}`);
@@ -418,7 +428,7 @@ async function main() {
         break;
 
       case 'configure_peer':
-        await configurePeer();
+        await configurePeer(args[1], args[2], args[3]);
         break;
 
       case 'add_relayer':
