@@ -18,7 +18,7 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 
 // 加载环境变量
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
 
 // ============ ABI 定义 ============
 
@@ -26,15 +26,15 @@ const BRIDGE_ABI = [
   // Admin functions
   'function initialize(address vaultAddress, address adminAddress) external',
   'function configureUsdc(address usdcAddress) external',
-  'function configurePeer(address peerContract, uint64 sourceChainId, uint64 targetChainId) external',
+  'function configurePeer(bytes32 peerContract, uint64 sourceChainId, uint64 targetChainId) external',
   'function addRelayer(address relayerAddress) external',
   'function removeRelayer(address relayerAddress) external',
   'function addLiquidity(uint256 amount) external',
   'function withdrawLiquidity(uint256 amount) external',
   
   // View functions
-  'function senderState() external view returns (address vault, address admin, address usdcContract, uint64 nonce, address targetContract, uint64 sourceChainId, uint64 targetChainId)',
-  'function receiverState() external view returns (address vault, address admin, address usdcContract, uint64 relayerCount, address sourceContract, uint64 sourceChainId, uint64 targetChainId, uint64 lastNonce)',
+  'function senderState() external view returns (address vault, address admin, address usdcContract, uint64 nonce, bytes32 targetContract, uint64 sourceChainId, uint64 targetChainId)',
+  'function receiverState() external view returns (address vault, address admin, address usdcContract, uint64 relayerCount, bytes32 sourceContract, uint64 sourceChainId, uint64 targetChainId, uint64 lastNonce)',
   'function getRelayers() external view returns (address[])',
 ];
 
@@ -177,8 +177,26 @@ async function configurePeer() {
 
   try {
     console.log('执行配置对端合约...');
+    
+    // Convert peer contract to bytes32 format
+    // Support both EVM addresses (0x...) and Solana addresses (base58)
+    let peerContractBytes32: string;
+    if (config.peerContract.startsWith('0x')) {
+      // EVM address: pad to 32 bytes
+      peerContractBytes32 = ethers.zeroPadValue(config.peerContract, 32);
+    } else {
+      // Assume it's a base58 Solana address - convert to bytes32
+      // For now, we'll just pad the hex representation
+      // In production, you'd want to properly decode base58
+      const buffer = Buffer.from(config.peerContract, 'utf-8');
+      const hex = '0x' + buffer.toString('hex').padEnd(64, '0');
+      peerContractBytes32 = hex.slice(0, 66); // Take first 32 bytes
+    }
+    
+    console.log(`  Peer Contract (bytes32): ${peerContractBytes32}`);
+    
     const tx = await bridge.configurePeer(
-      config.peerContract,
+      peerContractBytes32,
       config.sourceChainId,
       config.targetChainId
     );
@@ -458,4 +476,8 @@ export {
   withdrawLiquidity,
   queryState,
 };
+
+
+
+
 

@@ -17,7 +17,7 @@ contract Bridge1024 {
         address admin;
         address usdcContract;
         uint64 nonce;
-        address targetContract;
+        bytes32 targetContract;
         uint64 sourceChainId;
         uint64 targetChainId;
     }
@@ -27,7 +27,7 @@ contract Bridge1024 {
         address admin;
         address usdcContract;
         uint64 relayerCount;
-        address sourceContract;
+        bytes32 sourceContract;
         uint64 sourceChainId;
         uint64 targetChainId;
         address[] relayers;
@@ -35,8 +35,8 @@ contract Bridge1024 {
     }
     
     struct StakeEventData {
-        address sourceContract;
-        address targetContract;
+        bytes32 sourceContract;
+        bytes32 targetContract;
         uint64 sourceChainId;
         uint64 targetChainId;
         uint64 blockHeight;
@@ -63,7 +63,7 @@ contract Bridge1024 {
         address admin,
         address usdcContract,
         uint64 relayerCount,
-        address sourceContract,
+        bytes32 sourceContract,
         uint64 sourceChainId,
         uint64 targetChainId,
         uint64 lastNonce
@@ -89,8 +89,8 @@ contract Bridge1024 {
     // ============ Events ============
     
     event StakeEvent(
-        address indexed sourceContract,
-        address indexed targetContract,
+        bytes32 indexed sourceContract,
+        bytes32 indexed targetContract,
         uint64 chainId,
         uint64 blockHeight,
         uint64 amount,
@@ -141,28 +141,28 @@ contract Bridge1024 {
     
     /**
      * @notice Initialize both sender and receiver contracts
-     * @param vaultAddress Vault address for storing staked tokens
+     * @param vaultAddress Vault address (deprecated, contract itself acts as vault)
      * @param adminAddress Admin address for management operations
      */
     function initialize(address vaultAddress, address adminAddress) external {
         if (senderState.admin != address(0)) revert AlreadyInitialized();
         
-        // Initialize sender state
-        senderState.vault = vaultAddress;
+        // Initialize sender state - contract itself acts as vault
+        senderState.vault = address(this);
         senderState.admin = adminAddress;
         senderState.nonce = 0;
         senderState.usdcContract = address(0);
-        senderState.targetContract = address(0);
+        senderState.targetContract = bytes32(0);
         senderState.sourceChainId = 0;
         senderState.targetChainId = 0;
         
-        // Initialize receiver state
-        receiverStateInternal.vault = vaultAddress;
+        // Initialize receiver state - contract itself acts as vault
+        receiverStateInternal.vault = address(this);
         receiverStateInternal.admin = adminAddress;
         receiverStateInternal.lastNonce = 0;
         receiverStateInternal.relayerCount = 0;
         receiverStateInternal.usdcContract = address(0);
-        receiverStateInternal.sourceContract = address(0);
+        receiverStateInternal.sourceContract = bytes32(0);
         receiverStateInternal.sourceChainId = 0;
         receiverStateInternal.targetChainId = 0;
     }
@@ -178,12 +178,12 @@ contract Bridge1024 {
     
     /**
      * @notice Configure peer contract and chain IDs
-     * @param peerContract Peer contract address on the other chain
+     * @param peerContract Peer contract identifier on the other chain (bytes32 to support cross-chain addresses)
      * @param sourceChainId Current chain ID
      * @param targetChainId Target chain ID
      */
     function configurePeer(
-        address peerContract,
+        bytes32 peerContract,
         uint64 sourceChainId,
         uint64 targetChainId
     ) external onlyAdmin {
@@ -206,12 +206,12 @@ contract Bridge1024 {
      * @param receiverAddress Receiver address on target chain
      * @return nonce The nonce for this stake transaction
      */
-    function stake(uint64 amount, string memory receiverAddress) external returns (uint64) {
+    function stake(uint256 amount, string memory receiverAddress) external returns (uint64) {
         if (senderState.usdcContract == address(0)) revert UsdcNotConfigured();
         
-        // Transfer tokens from user to vault
+        // Transfer tokens from user to contract (contract acts as vault)
         IERC20 usdc = IERC20(senderState.usdcContract);
-        require(usdc.transferFrom(msg.sender, senderState.vault, amount), "Transfer failed");
+        require(usdc.transferFrom(msg.sender, address(this), amount), "Transfer failed");
         
         // Update nonce
         uint64 currentNonce = senderState.nonce;
@@ -223,11 +223,11 @@ contract Bridge1024 {
         
         // Emit stake event
         emit StakeEvent(
-            address(this),
+            bytes32(uint256(uint160(address(this)))),
             senderState.targetContract,
             senderState.sourceChainId,
             uint64(block.number),
-            amount,
+            uint64(amount),
             receiverAddress,
             newNonce
         );
@@ -330,10 +330,10 @@ contract Bridge1024 {
             nonceSignature.isUnlocked = true;
             receiverStateInternal.lastNonce = eventData.nonce;
             
-            // Unlock tokens: transfer from vault to receiver
+            // Unlock tokens: transfer from contract (vault) to receiver
             IERC20 usdc = IERC20(receiverStateInternal.usdcContract);
             address receiver = _parseAddress(eventData.receiverAddress);
-            require(usdc.transferFrom(receiverStateInternal.vault, receiver, eventData.amount), "Transfer failed");
+            require(usdc.transfer(receiver, eventData.amount), "Transfer failed");
             
             emit TokensUnlocked(eventData.nonce, receiver, eventData.amount);
         }
@@ -425,8 +425,8 @@ contract Bridge1024 {
         // Serialize event data to JSON-like format to match SVM
         // Format: {"sourceContract":"...","targetContract":"...","chainId":"...","blockHeight":"...","amount":"...","receiverAddress":"...","nonce":"..."}
         bytes memory json = abi.encodePacked(
-            '{"sourceContract":"', _addressToString(eventData.sourceContract),
-            '","targetContract":"', _addressToString(eventData.targetContract),
+            '{"sourceContract":"', _bytes32ToString(eventData.sourceContract),
+            '","targetContract":"', _bytes32ToString(eventData.targetContract),
             '","chainId":"', _uint64ToString(eventData.sourceChainId),
             '","blockHeight":"', _uint64ToString(eventData.blockHeight),
             '","amount":"', _uint64ToString(eventData.amount),
@@ -439,14 +439,15 @@ contract Bridge1024 {
     }
     
     /**
-     * @notice Convert address to hex string (lowercase, no 0x prefix)
+     * @notice Convert bytes32 to hex string (lowercase, no 0x prefix)
+     * @dev Converts full 32 bytes to 64 character hex string to support cross-chain addresses
      */
-    function _addressToString(address addr) internal pure returns (string memory) {
+    function _bytes32ToString(bytes32 data) internal pure returns (string memory) {
         bytes memory alphabet = "0123456789abcdef";
-        bytes memory str = new bytes(40);
+        bytes memory str = new bytes(64);
         
-        for (uint i = 0; i < 20; i++) {
-            uint8 b = uint8(uint(uint160(addr)) / (2**(8*(19 - i))));
+        for (uint i = 0; i < 32; i++) {
+            uint8 b = uint8(data[i]);
             str[i*2] = alphabet[b >> 4];
             str[i*2 + 1] = alphabet[b & 0x0f];
         }

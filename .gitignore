@@ -1,1 +1,10 @@
 target/
+.env
+.env.evm.deploy
+.env.svm.deploy
+.env.*
+node_modules/
+test-ledger/
+.relayer/
+.cursor/
+.backup_*

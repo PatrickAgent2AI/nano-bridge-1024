@@ -1,0 +1,236 @@
+use crate::config::ListenerConfig;
+use anyhow::{anyhow, Result};
+use ethers::{
+    abi::ParamType,
+    contract::EthEvent,
+    core::types::Address,
+    prelude::*,
+    providers::{Http, Middleware, Provider},
+};
+use shared::types::StakeEventData;
+use std::{path::Path, sync::Arc};
+use tracing::{error, info, warn};
+
+// StakeEvent ABI 定义
+#[derive(Debug, Clone, EthEvent)]
+#[ethevent(
+    name = "StakeEvent",
+    abi = "StakeEvent(bytes32,bytes32,uint64,uint64,uint64,string,uint64)"
+)]
+pub struct StakeEvent {
+    #[ethevent(indexed)]
+    pub source_contract: [u8; 32],
+    #[ethevent(indexed)]
+    pub target_contract: [u8; 32],
+    pub chain_id: u64,
+    pub block_height: u64,
+    pub amount: u64,
+    pub receiver_address: String,
+    pub nonce: u64,
+}
+
+/// 启动 EVM 事件监听器
+pub async fn start_listener(config: ListenerConfig) -> Result<()> {
+    info!("Starting EVM event listener");
+    info!(
+        rpc = config.source_chain.rpc_url,
+        contract = config.source_chain.contract_address,
+        "Connecting to EVM"
+    );
+
+    // 创建 Provider
+    let provider = Provider::<Http>::try_from(&config.source_chain.rpc_url)
+        .map_err(|e| anyhow!("Failed to create provider: {}", e))?;
+    let provider = Arc::new(provider);
+
+    // 解析合约地址
+    let contract_address: Address = config
+        .source_chain
+        .contract_address
+        .parse()
+        .map_err(|e| anyhow!("Invalid contract address: {}", e))?;
+
+    info!("Connected to EVM, starting to listen for events");
+
+    // 获取当前区块号
+    let mut last_block = provider
+        .get_block_number()
+        .await
+        .map_err(|e| anyhow!("Failed to get block number: {}", e))?
+        .as_u64();
+
+    info!(block = last_block, "Starting from current block");
+
+    // 创建事件队列目录
+    let queue_dir = &config.queue.path;
+    std::fs::create_dir_all(queue_dir)?;
+    info!(queue_path = %queue_dir.display(), "Queue directory initialized");
+
+    // 持续监听新区块
+    loop {
+        match listen_for_events(&provider, contract_address, last_block, &config).await {
+            Ok(new_block) => {
+                if new_block > last_block {
+                    last_block = new_block;
+                }
+            }
+            Err(e) => {
+                error!("Error listening for events: {}", e);
+            }
+        }
+
+        // 等待一段时间后继续
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// 监听指定区块范围的事件
+async fn listen_for_events(
+    provider: &Provider<Http>,
+    contract_address: Address,
+    from_block: u64,
+    config: &ListenerConfig,
+) -> Result<u64> {
+    // 获取最新区块号
+    let latest_block = provider
+        .get_block_number()
+        .await
+        .map_err(|e| anyhow!("Failed to get latest block: {}", e))?
+        .as_u64();
+
+    // 如果没有新区块，返回当前区块号
+    if latest_block <= from_block {
+        return Ok(from_block);
+    }
+
+    // 查询事件（限制查询范围以避免超时）
+    let to_block = std::cmp::min(from_block + 1000, latest_block);
+
+    info!(
+        from = from_block,
+        to = to_block,
+        "Querying events from block range"
+    );
+
+    // 创建事件过滤器
+    let event_signature = StakeEvent::signature();
+    let filter = Filter::new()
+        .address(contract_address)
+        .from_block(from_block)
+        .to_block(to_block)
+        .topic0(event_signature);
+
+    // 查询日志
+    let logs = provider
+        .get_logs(&filter)
+        .await
+        .map_err(|e| anyhow!("Failed to get logs: {}", e))?;
+
+    info!(count = logs.len(), "Found events");
+
+    // 处理每个日志
+    for log in logs {
+        match parse_stake_event(&log) {
+            Ok(event) => {
+                info!(
+                    nonce = event.nonce,
+                    amount = event.amount,
+                    receiver = event.receiver_address,
+                    "Processing StakeEvent"
+                );
+
+                // 转换为 StakeEventData
+                let event_data = StakeEventData {
+                    source_contract: hex::encode(event.source_contract),
+                    target_contract: hex::encode(event.target_contract),
+                    source_chain_id: event.chain_id,
+                    target_chain_id: config.target_chain.chain_id,
+                    block_height: event.block_height,
+                    amount: event.amount,
+                    receiver_address: event.receiver_address.clone(),
+                    nonce: event.nonce,
+                };
+
+                // 保存到队列文件
+                if let Err(e) = save_to_queue(&event_data, &config.queue.path) {
+                    error!(nonce = event.nonce, error = %e, "Failed to save event to queue");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to parse StakeEvent");
+            }
+        }
+    }
+
+    Ok(to_block)
+}
+
+/// 解析 StakeEvent
+fn parse_stake_event(log: &Log) -> Result<StakeEvent> {
+    // 检查日志是否有足够的 topics
+    if log.topics.len() < 3 {
+        return Err(anyhow!("Insufficient topics in log"));
+    }
+
+    // 解析 indexed 字段
+    let source_contract: [u8; 32] = log.topics[1].into();
+    let target_contract: [u8; 32] = log.topics[2].into();
+
+    // 解析非 indexed 字段
+    let data_tokens = ethers::abi::decode(
+        &[
+            ParamType::Uint(64),  // chain_id
+            ParamType::Uint(64),  // block_height
+            ParamType::Uint(64),  // amount
+            ParamType::String,    // receiver_address
+            ParamType::Uint(64),  // nonce
+        ],
+        &log.data,
+    )
+    .map_err(|e| anyhow!("Failed to decode log data: {}", e))?;
+
+    let chain_id = data_tokens[0]
+        .clone()
+        .into_uint()
+        .ok_or_else(|| anyhow!("Invalid chain_id"))?
+        .as_u64();
+    let block_height = data_tokens[1]
+        .clone()
+        .into_uint()
+        .ok_or_else(|| anyhow!("Invalid block_height"))?
+        .as_u64();
+    let amount = data_tokens[2]
+        .clone()
+        .into_uint()
+        .ok_or_else(|| anyhow!("Invalid amount"))?
+        .as_u64();
+    let receiver_address = data_tokens[3]
+        .clone()
+        .into_string()
+        .ok_or_else(|| anyhow!("Invalid receiver_address"))?;
+    let nonce = data_tokens[4]
+        .clone()
+        .into_uint()
+        .ok_or_else(|| anyhow!("Invalid nonce"))?
+        .as_u64();
+
+    Ok(StakeEvent {
+        source_contract,
+        target_contract,
+        chain_id,
+        block_height,
+        amount,
+        receiver_address,
+        nonce,
+    })
+}
+
+/// 保存事件到队列文件
+fn save_to_queue(event: &StakeEventData, queue_dir: &Path) -> Result<()> {
+    let queue_file = queue_dir.join(format!("event_{}.json", event.nonce));
+    let json = serde_json::to_string_pretty(event)?;
+    std::fs::write(&queue_file, json)?;
+    info!(nonce = event.nonce, path = %queue_file.display(), "Event saved to queue");
+    Ok(())
+}
+

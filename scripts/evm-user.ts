@@ -12,7 +12,7 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 
 // 加载环境变量
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
 
 // ============ ABI 定义 ============
 
@@ -245,8 +245,11 @@ async function main() {
     }
 
     printSuccess('操作完成！');
-  } catch (error) {
-    printError(`操作失败`);
+  } catch (error: any) {
+    printError(`操作失败: ${error?.message || error}`);
+    if (error?.stack) {
+      console.error(error.stack);
+    }
     process.exit(1);
   }
 }
@@ -257,4 +260,8 @@ if (require.main === module) {
 }
 
 export { stake, queryBalance, queryContractState };
+
+
+
+
 

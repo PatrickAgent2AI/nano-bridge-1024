@@ -16,34 +16,47 @@ NC='\033[0m' # No Color
 # 配置
 # ==============================================================================
 
-RPC_URL="${EVM_RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}"
-PRIVATE_KEY="${ADMIN_EVM_PRIVATE_KEY}"
-VAULT_ADDRESS="${EVM_VAULT_ADDRESS}"
-ADMIN_ADDRESS="${EVM_ADMIN_ADDRESS}"
+# 获取项目路径
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 CONTRACT_DIR="$PROJECT_ROOT/evm/bridge1024"
-ENV_FILE="$PROJECT_ROOT/.env"
+ENV_FILE="$PROJECT_ROOT/.env.evm.deploy"
+
+# 从 .env.evm.deploy 文件加载环境变量
+if [ -f "$ENV_FILE" ]; then
+    set -a  # 自动导出所有变量
+    source "$ENV_FILE"
+    set +a  # 关闭自动导出
+else
+    echo -e "${RED}未找到 .env.evm.deploy 文件${NC}"
+    exit 1
+fi
+
+# 读取环境变量
+RPC_URL="${EVM_RPC_URL:-https://sepolia-rollup.arbitrum.io/rpc}"
+
+# 确保 RPC URL 有正确的协议前缀
+if [[ ! "$RPC_URL" =~ ^https?:// ]]; then
+    RPC_URL="https://$RPC_URL"
+fi
+
+PRIVATE_KEY="${ADMIN_EVM_PRIVATE_KEY}"
+ADMIN_ADDRESS="${EVM_ADMIN_ADDRESS}"
 
 # ==============================================================================
 # 检查环境变量
 # ==============================================================================
 
 if [ -z "$PRIVATE_KEY" ]; then
-    echo -e "${RED}✗ 失败: 未设置 ADMIN_EVM_PRIVATE_KEY${NC}"
+    echo -e "${RED}未设置 ADMIN_EVM_PRIVATE_KEY${NC}"
     exit 1
 fi
 
-if [ -z "$VAULT_ADDRESS" ]; then
-    echo -e "${YELLOW}⚠ 警告: 未设置 EVM_VAULT_ADDRESS，将使用部署者地址${NC}"
-    # 从私钥获取地址
-    VAULT_ADDRESS=$(cast wallet address "$PRIVATE_KEY" 2>/dev/null || echo "")
-fi
-
 if [ -z "$ADMIN_ADDRESS" ]; then
-    echo -e "${YELLOW}⚠ 警告: 未设置 EVM_ADMIN_ADDRESS，将使用部署者地址${NC}"
     ADMIN_ADDRESS=$(cast wallet address "$PRIVATE_KEY" 2>/dev/null || echo "")
 fi
+
+# 注意：从 v2.0 开始，合约本身作为金库，不需要单独的 vault 地址
 
 # ==============================================================================
 # 部署合约
@@ -55,63 +68,77 @@ cd "$CONTRACT_DIR" || exit 1
 forge build --silent 2>/dev/null
 
 # 部署Bridge1024
-echo "正在部署 Bridge1024..."
-DEPLOY_OUTPUT=$(forge create \
+# 创建临时文件保存输出
+TEMP_OUTPUT=$(mktemp)
+
+# 部署合约（静默输出）
+forge create \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
+    --broadcast \
     src/Bridge1024.sol:Bridge1024 \
-    2>&1)
+    > "$TEMP_OUTPUT" 2>&1
 
-if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ 失败: 合约部署失败${NC}"
-    echo "$DEPLOY_OUTPUT" | grep -i "error" | head -5
+DEPLOY_EXIT_CODE=$?
+
+if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+    echo -e "${RED}部署失败${NC}"
+    cat "$TEMP_OUTPUT"
+    rm -f "$TEMP_OUTPUT"
     exit 1
 fi
 
-# 提取合约地址
-CONTRACT_ADDRESS=$(echo "$DEPLOY_OUTPUT" | grep "Deployed to:" | awk '{print $3}')
+# 从输出中提取交易哈希
+DEPLOY_TX=$(grep -oP "Transaction hash:\s*\K(0x[a-fA-F0-9]{64})" "$TEMP_OUTPUT" | head -1)
+
+# 从输出中提取合约地址
+CONTRACT_ADDRESS=$(grep -oP "Deployed to:\s*\K(0x[a-fA-F0-9]{40})" "$TEMP_OUTPUT" | head -1)
 
 if [ -z "$CONTRACT_ADDRESS" ]; then
-    echo -e "${RED}✗ 失败: 无法获取合约地址${NC}"
+    echo -e "${RED}无法提取合约地址${NC}"
+    cat "$TEMP_OUTPUT"
+    rm -f "$TEMP_OUTPUT"
     exit 1
 fi
+
+rm -f "$TEMP_OUTPUT"
+
+# 输出部署信息
+echo "部署交易: ${DEPLOY_TX}"
+echo "合约地址: ${CONTRACT_ADDRESS}"
+echo "浏览器: https://sepolia.arbiscan.io/address/${CONTRACT_ADDRESS}"
 
 # ==============================================================================
 # 初始化合约
 # ==============================================================================
 
-echo "正在初始化合约..."
+# 注意：vaultAddress 参数已废弃，合约内部使用 address(this) 作为金库
+# 但为了兼容性，仍然传入一个地址（会被忽略）
 INIT_OUTPUT=$(cast send "$CONTRACT_ADDRESS" \
     "initialize(address,address)" \
-    "$VAULT_ADDRESS" \
+    "$ADMIN_ADDRESS" \
     "$ADMIN_ADDRESS" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
     2>&1)
 
 if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ 失败: 合约初始化失败${NC}"
-    echo "$INIT_OUTPUT" | grep -i "error" | head -5
+    echo -e "${RED}初始化失败${NC}"
+    echo "$INIT_OUTPUT" | grep -i "error"
     exit 1
 fi
 
-# ==============================================================================
-# 成功输出
-# ==============================================================================
+# 提取初始化交易哈希
+INIT_TX=$(echo "$INIT_OUTPUT" | grep -oP "transactionHash\s+\K(0x[a-fA-F0-9]{64})" | head -1)
 
-echo ""
-echo -e "${GREEN}✓ 成功${NC}"
-echo "合约地址: ${CONTRACT_ADDRESS}"
-echo ""
-echo "浏览器: https://sepolia.arbiscan.io/address/${CONTRACT_ADDRESS}"
+echo "初始化交易: ${INIT_TX}"
 
-# 保存到环境变量文件（如果.env存在）
+# 保存到环境变量文件
 if [ -f "$ENV_FILE" ]; then
     if grep -q "EVM_CONTRACT_ADDRESS=" "$ENV_FILE"; then
         sed -i "s|EVM_CONTRACT_ADDRESS=.*|EVM_CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$ENV_FILE"
     else
         echo "EVM_CONTRACT_ADDRESS=${CONTRACT_ADDRESS}" >> "$ENV_FILE"
     fi
-    echo "已更新 .env 文件"
 fi
 

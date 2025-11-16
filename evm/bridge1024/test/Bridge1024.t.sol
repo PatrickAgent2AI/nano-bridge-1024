@@ -32,7 +32,7 @@ contract Bridge1024Test is Test {
     uint256 public nonRelayerPrivateKey;
     address public nonAdmin;
     uint256 public nonAdminPrivateKey;
-    address public peerContract;
+    bytes32 public peerContract;
     
     // Test constants (aligned with SVM)
     uint64 public constant SOURCE_CHAIN_ID = 421614; // Arbitrum Sepolia
@@ -44,8 +44,8 @@ contract Bridge1024Test is Test {
     
     // Events for testing
     event StakeEvent(
-        address indexed sourceContract,
-        address indexed targetContract,
+        bytes32 indexed sourceContract,
+        bytes32 indexed targetContract,
         uint64 chainId,
         uint64 blockHeight,
         uint64 amount,
@@ -86,7 +86,7 @@ contract Bridge1024Test is Test {
         nonAdminPrivateKey = 0xBAD2;
         nonAdmin = vm.addr(nonAdminPrivateKey);
         
-        peerContract = makeAddr("peerContract");
+        peerContract = bytes32(uint256(uint160(makeAddr("peerContract"))));
         
         // Deploy contracts
         bridge = new Bridge1024();
@@ -95,14 +95,12 @@ contract Bridge1024Test is Test {
         // Fund vault with ETH for transaction fees
         vm.deal(vault, 100 ether);
         
-        // Mint test USDC to users and vault
+        // Mint test USDC to users and contract (contract acts as vault)
         usdc.mint(user1, 1000 * TEST_AMOUNT);
         usdc.mint(user2, 1000 * TEST_AMOUNT);
-        usdc.mint(vault, 10000 * TEST_AMOUNT);
+        usdc.mint(address(bridge), 10000 * TEST_AMOUNT);
         
-        // Approve bridge to spend USDC from vault (for unlock operations)
-        vm.prank(vault);
-        usdc.approve(address(bridge), type(uint256).max);
+        // No need to approve - contract uses transfer() not transferFrom()
     }
     
     // ============ Helper Functions (Aligned with SVM) ============
@@ -113,8 +111,8 @@ contract Bridge1024Test is Test {
      */
     function hashEventData(Bridge1024.StakeEventData memory eventData) internal pure returns (bytes32) {
         bytes memory json = abi.encodePacked(
-            '{"sourceContract":"', addressToString(eventData.sourceContract),
-            '","targetContract":"', addressToString(eventData.targetContract),
+            '{"sourceContract":"', bytes32ToString(eventData.sourceContract),
+            '","targetContract":"', bytes32ToString(eventData.targetContract),
             '","chainId":"', uint64ToString(eventData.sourceChainId),
             '","blockHeight":"', uint64ToString(eventData.blockHeight),
             '","amount":"', uint64ToString(eventData.amount),
@@ -154,7 +152,24 @@ contract Bridge1024Test is Test {
     }
     
     /**
+     * @notice Convert bytes32 to hex string (lowercase, no 0x prefix)
+     */
+    function bytes32ToString(bytes32 data) internal pure returns (string memory) {
+        bytes memory alphabet = "0123456789abcdef";
+        bytes memory str = new bytes(64);
+        
+        for (uint i = 0; i < 32; i++) {
+            uint8 b = uint8(data[i]);
+            str[i*2] = alphabet[b >> 4];
+            str[i*2 + 1] = alphabet[b & 0x0f];
+        }
+        
+        return string(str);
+    }
+    
+    /**
      * @notice Convert address to hex string (lowercase, no 0x prefix)
+     * @dev Helper for converting receiver addresses
      */
     function addressToString(address addr) internal pure returns (string memory) {
         bytes memory alphabet = "0123456789abcdef";
@@ -202,25 +217,25 @@ contract Bridge1024Test is Test {
         vm.prank(admin);
         bridge.initialize(vault, admin);
         
-        // Verify sender state
+        // Verify sender state - vault is now contract itself
         (address sVault, address sAdmin, address sUsdc, uint64 sNonce, 
-         address sTarget, uint64 sSourceChain, uint64 sTargetChain) = bridge.senderState();
-        assertEq(sVault, vault);
+         bytes32 sTarget, uint64 sSourceChain, uint64 sTargetChain) = bridge.senderState();
+        assertEq(sVault, address(bridge)); // Contract acts as vault
         assertEq(sAdmin, admin);
         assertEq(sUsdc, address(0)); // Not configured yet
         assertEq(sNonce, 0);
-        assertEq(sTarget, address(0)); // Not configured yet
+        assertEq(sTarget, bytes32(0)); // Not configured yet
         assertEq(sSourceChain, 0); // Not configured yet
         assertEq(sTargetChain, 0); // Not configured yet
         
-        // Verify receiver state
+        // Verify receiver state - vault is now contract itself
         (address rVault, address rAdmin, address rUsdc, uint64 rRelayerCount, 
-         address rSource, uint64 rSourceChain, uint64 rTargetChain, uint64 rLastNonce) = bridge.receiverState();
-        assertEq(rVault, vault);
+         bytes32 rSource, uint64 rSourceChain, uint64 rTargetChain, uint64 rLastNonce) = bridge.receiverState();
+        assertEq(rVault, address(bridge)); // Contract acts as vault
         assertEq(rAdmin, admin);
         assertEq(rUsdc, address(0)); // Not configured yet
         assertEq(rRelayerCount, 0);
-        assertEq(rSource, address(0)); // Not configured yet
+        assertEq(rSource, bytes32(0)); // Not configured yet
         assertEq(rSourceChain, 0); // Not configured yet
         assertEq(rTargetChain, 0); // Not configured yet
         assertEq(rLastNonce, 0);
@@ -247,7 +262,7 @@ contract Bridge1024Test is Test {
         vm.stopPrank();
         
         // Verify sender configuration
-        (, , , , address sTarget, uint64 sSourceChain, uint64 sTargetChain) = bridge.senderState();
+        (, , , , bytes32 sTarget, uint64 sSourceChain, uint64 sTargetChain) = bridge.senderState();
         assertEq(sTarget, peerContract);
         assertEq(sSourceChain, SOURCE_CHAIN_ID);
         assertEq(sTargetChain, TARGET_CHAIN_ID);
@@ -260,7 +275,7 @@ contract Bridge1024Test is Test {
         vm.stopPrank();
         
         // Verify receiver configuration
-        (, , , , address rSource, uint64 rSourceChain, uint64 rTargetChain, ) = bridge.receiverState();
+        (, , , , bytes32 rSource, uint64 rSourceChain, uint64 rTargetChain, ) = bridge.receiverState();
         assertEq(rSource, peerContract);
         assertEq(rSourceChain, SOURCE_CHAIN_ID);
         assertEq(rTargetChain, TARGET_CHAIN_ID);
@@ -290,13 +305,13 @@ contract Bridge1024Test is Test {
         vm.startPrank(user1);
         usdc.approve(address(bridge), TEST_AMOUNT);
         
-        uint256 vaultBalanceBefore = usdc.balanceOf(vault);
+        uint256 contractBalanceBefore = usdc.balanceOf(address(bridge));
         uint256 userBalanceBefore = usdc.balanceOf(user1);
         
         // Expect StakeEvent
         vm.expectEmit(true, true, false, true);
         emit StakeEvent(
-            address(bridge),
+            bytes32(uint256(uint160(address(bridge)))),
             peerContract,
             SOURCE_CHAIN_ID,
             uint64(block.number),
@@ -308,9 +323,9 @@ contract Bridge1024Test is Test {
         uint64 nonce = bridge.stake(TEST_AMOUNT, addressToString(user2));
         vm.stopPrank();
         
-        // Verify results
+        // Verify results - contract acts as vault
         assertEq(nonce, 1);
-        assertEq(usdc.balanceOf(vault), vaultBalanceBefore + TEST_AMOUNT);
+        assertEq(usdc.balanceOf(address(bridge)), contractBalanceBefore + TEST_AMOUNT);
         assertEq(usdc.balanceOf(user1), userBalanceBefore - TEST_AMOUNT);
         assertEq(bridge.getSenderNonce(), 1);
     }
@@ -382,11 +397,11 @@ contract Bridge1024Test is Test {
         // Find StakeEvent (should be the last event)
         bool found = false;
         for (uint i = 0; i < entries.length; i++) {
-            if (entries[i].topics[0] == keccak256("StakeEvent(address,address,uint64,uint64,uint64,string,uint64)")) {
+            if (entries[i].topics[0] == keccak256("StakeEvent(bytes32,bytes32,uint64,uint64,uint64,string,uint64)")) {
                 found = true;
                 // Verify event fields
-                assertEq(address(uint160(uint256(entries[i].topics[1]))), address(bridge)); // sourceContract
-                assertEq(address(uint160(uint256(entries[i].topics[2]))), peerContract); // targetContract
+                assertEq(bytes32(entries[i].topics[1]), bytes32(uint256(uint160(address(bridge))))); // sourceContract
+                assertEq(bytes32(entries[i].topics[2]), peerContract); // targetContract
                 // Decode data to verify other fields
                 (uint64 chainId, uint64 blockHeight, uint64 amount, string memory receiverAddress, uint64 eventNonce) = 
                     abi.decode(entries[i].data, (uint64, uint64, uint64, string, uint64));
@@ -484,7 +499,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -524,7 +539,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -538,7 +553,7 @@ contract Bridge1024Test is Test {
         bytes memory signature2 = signEventData(eventData, relayer2PrivateKey);
         
         uint256 receiverBalanceBefore = usdc.balanceOf(user2);
-        uint256 vaultBalanceBefore = usdc.balanceOf(vault);
+        uint256 contractBalanceBefore = usdc.balanceOf(address(bridge));
         
         vm.prank(relayer1);
         bridge.submitSignature(eventData, signature1);
@@ -549,9 +564,9 @@ contract Bridge1024Test is Test {
         emit TokensUnlocked(1, user2, TEST_AMOUNT);
         bridge.submitSignature(eventData, signature2);
         
-        // Verify unlock
+        // Verify unlock - contract acts as vault
         assertEq(usdc.balanceOf(user2), receiverBalanceBefore + TEST_AMOUNT);
-        assertEq(usdc.balanceOf(vault), vaultBalanceBefore - TEST_AMOUNT);
+        assertEq(usdc.balanceOf(address(bridge)), contractBalanceBefore - TEST_AMOUNT);
         assertEq(bridge.getReceiverLastNonce(), 1);
     }
     
@@ -571,7 +586,7 @@ contract Bridge1024Test is Test {
         // Process nonce 1
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -593,7 +608,7 @@ contract Bridge1024Test is Test {
         // Create a fresh event with same nonce
         Bridge1024.StakeEventData memory replayEvent = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -625,7 +640,7 @@ contract Bridge1024Test is Test {
         // Process nonce 2 first (simulating out-of-order processing)
         Bridge1024.StakeEventData memory eventData2 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -646,7 +661,7 @@ contract Bridge1024Test is Test {
         // Try to process nonce 1 (smaller than lastNonce which is now 2)
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -679,7 +694,7 @@ contract Bridge1024Test is Test {
         // Process nonce 1
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -700,7 +715,7 @@ contract Bridge1024Test is Test {
         // Process nonce 3 (larger than lastNonce + 1, should succeed)
         Bridge1024.StakeEventData memory eventData3 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -738,7 +753,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -772,7 +787,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -802,7 +817,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -830,10 +845,10 @@ contract Bridge1024Test is Test {
         vm.stopPrank();
         
         // Create event data with wrong source contract
-        address wrongContract = makeAddr("wrongContract");
+        bytes32 wrongContract = bytes32(uint256(uint160(makeAddr("wrongContract"))));
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: wrongContract, // Wrong!
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -863,7 +878,7 @@ contract Bridge1024Test is Test {
         // Create event data with wrong chain ID
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: 999999, // Wrong!
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -909,7 +924,7 @@ contract Bridge1024Test is Test {
         // Create event data (as if from SVM)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -951,7 +966,7 @@ contract Bridge1024Test is Test {
         // Simulate receiving cross-chain request from SVM
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: TARGET_CHAIN_ID,
             targetChainId: SOURCE_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -992,7 +1007,7 @@ contract Bridge1024Test is Test {
         for (uint256 i = 1; i <= transferCount; i++) {
             Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
                 sourceContract: peerContract,
-                targetContract: address(bridge),
+                targetContract: bytes32(uint256(uint160(address(bridge)))),
                 sourceChainId: SOURCE_CHAIN_ID,
                 targetChainId: TARGET_CHAIN_ID,
                 blockHeight: uint64(block.number),
@@ -1033,7 +1048,7 @@ contract Bridge1024Test is Test {
         
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1074,7 +1089,7 @@ contract Bridge1024Test is Test {
         // Process transaction with nonce 1
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1112,7 +1127,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1157,14 +1172,11 @@ contract Bridge1024Test is Test {
         vm.prank(admin);
         bridge.initialize(vault, admin);
         
-        // Try to transfer directly from vault without going through bridge
-        vm.prank(vault);
-        // This should work because vault is a regular address with approval
-        // In production, vault should be a contract with access control
-        // For now, we test that only authorized bridge operations should modify vault
+        // Contract acts as vault - check contract has balance
+        // Since contract holds tokens directly, it needs proper access control
         
-        uint256 vaultBalance = usdc.balanceOf(vault);
-        assertTrue(vaultBalance > 0, "Vault should have balance");
+        uint256 contractBalance = usdc.balanceOf(address(bridge));
+        assertTrue(contractBalance > 0, "Contract (vault) should have balance");
     }
     
     function testST004_VaultSecurity_InsufficientBalance() public {
@@ -1179,12 +1191,12 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer2);
         vm.stopPrank();
         
-        // Try to unlock more than vault has
-        uint64 excessiveAmount = uint64(usdc.balanceOf(vault) + 1);
+        // Try to unlock more than contract has
+        uint64 excessiveAmount = uint64(usdc.balanceOf(address(bridge)) + 1);
         
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1251,7 +1263,7 @@ contract Bridge1024Test is Test {
         // Create event data
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1292,7 +1304,7 @@ contract Bridge1024Test is Test {
         // Step 2: Submit signatures
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
-            targetContract: address(bridge),
+            targetContract: bytes32(uint256(uint160(address(bridge)))),
             sourceChainId: SOURCE_CHAIN_ID,
             targetChainId: TARGET_CHAIN_ID,
             blockHeight: uint64(block.number),
@@ -1337,7 +1349,7 @@ contract Bridge1024Test is Test {
         for (uint256 i = 1; i <= transferCount; i++) {
             Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
                 sourceContract: peerContract,
-                targetContract: address(bridge),
+                targetContract: bytes32(uint256(uint160(address(bridge)))),
                 sourceChainId: SOURCE_CHAIN_ID,
                 targetChainId: TARGET_CHAIN_ID,
                 blockHeight: uint64(block.number),

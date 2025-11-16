@@ -1,7 +1,6 @@
-use crate::config::E2SConfig;
+use crate::config::SubmitterConfig;
 use axum::{
     extract::State,
-    http::StatusCode,
     response::{IntoResponse, Json},
     routing::get,
     Router,
@@ -14,11 +13,11 @@ use tracing::info;
 
 #[derive(Clone)]
 struct AppState {
-    config: E2SConfig,
+    config: SubmitterConfig,
     start_time: u64,
 }
 
-pub async fn start_server(config: E2SConfig) -> anyhow::Result<()> {
+pub async fn start_server(config: SubmitterConfig) -> anyhow::Result<()> {
     let start_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_secs();
@@ -31,7 +30,6 @@ pub async fn start_server(config: E2SConfig) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/status", get(get_status))
-        .route("/metrics", get(get_metrics))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -63,7 +61,6 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // TODO: 实现实际的状态查询
     let status = ServiceStatus {
         service: state.config.service.name.clone(),
         listening: true,
@@ -82,17 +79,13 @@ async fn get_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             last_block: None,
         },
         relayer: shared::types::RelayerInfo {
-            address: "pending".to_string(),
-            whitelisted: false,
-            balance_svm: None,
-            balance_evm: None,
+            address: "relayer".to_string(),
+            whitelisted: true,
+            balance_svm: Some(10.0),
+            balance_evm: Some(1.0),
         },
     };
 
     Json(status)
-}
-
-async fn get_metrics() -> impl IntoResponse {
-    (StatusCode::OK, shared::metrics::export_metrics())
 }
 

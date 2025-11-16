@@ -8,7 +8,12 @@
 
 **当前阶段：** M4 - Relayer 服务开发（技术选型和测试框架设计完成 ✅）
 
-**最新进展（2025-11-13）：**
+**最新进展（2025-11-15）：**
+- ✅ **EVM 合约重构完成（v2.0）** ⭐
+  - ✅ **合约本身作为金库**：简化架构，提高安全性
+  - ✅ 无需外部 vault 地址和 approve 操作
+  - ✅ 使用 `transfer()` 而非 `transferFrom()` 转出代币
+  - ✅ 所有 41 个测试通过（100%）
 - ✅ **SVM 合约核心功能开发完成**
   - ✅ 统一初始化功能（initialize）
   - ✅ USDC配置功能（configure_usdc）
@@ -20,7 +25,7 @@
   - ✅ Nonce递增判断机制（防重放攻击）
   - ✅ CrossChainRequest PDA账户（支持无限请求）
   - ✅ 流动性管理（add_liquidity, withdraw_liquidity）
-- ✅ **测试完成情况：45/48 测试通过（93.75%），3个合理跳过**
+- ✅ **测试完成情况：SVM 45/48（93.75%，3个合理跳过），EVM 41/41（100%）**
   - ✅ 统一合约测试：4/4 通过
   - ✅ 发送端合约测试：4/4 通过（TC-007已删除）
   - ✅ 接收端合约测试：11/11 通过
@@ -177,6 +182,7 @@ ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
   - **对端配置**：`configure_peer` 函数配置对端合约和链ID
   - 发送端合约：负责质押 USDC 并触发质押事件
   - 接收端合约：验证 relayer **ECDSA** 签名并解锁 USDC
+  - **金库设计（v2.0）**：合约本身作为金库，无需外部 vault 或 approve
   - **密码学**：ECDSA (secp256k1) + EIP-191 + SHA-256 + JSON（Ethereum 原生）
 
 ### 中继服务
@@ -219,10 +225,18 @@ ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
 - 接收端链的 RPC 地址
 - 发送端合约地址
 - 接收端合约地址
-- 质押金库地址（SVM 和 EVM 各自独立，但在SVM中发送端和接收端共享同一个金库）
+- 质押金库地址：
+  - **SVM端**：PDA 金库地址（发送端和接收端共享同一个金库）
+  - **EVM端（v2.0）**：合约本身作为金库，不需要单独配置
 - 管理员钱包地址（SVM 和 EVM 各自独立，但在SVM中发送端和接收端共享同一个管理员）
 - USDC代币地址：
   - SVM端：USDC mint account地址（通过 `configure_usdc` 配置）
   - EVM端：USDC ERC20合约地址（通过 `configure_usdc` 配置）
 - Relayer 私钥列表（最多18个relayer）
 - Chain ID（Arbitrum Sepolia/Mainnet，1024chain Testnet/Mainnet）
+
+### EVM v2.0 金库变更
+
+- ✅ **合约即金库**：合约地址直接持有 USDC，不需要外部 vault
+- ✅ **简化部署**：不需要配置 vault 地址或进行 approve 操作
+- ✅ **流动性管理**：直接向合约地址转入 USDC 即可增加流动性

@@ -1,0 +1,345 @@
+use crate::config::SubmitterConfig;
+use crate::signer::Ed25519Signer;
+use anyhow::{anyhow, Result};
+use borsh::BorshSerialize;
+use shared::types::StakeEventData;
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::{
+    commitment_config::CommitmentConfig,
+    instruction::{AccountMeta, Instruction},
+    pubkey::Pubkey,
+    signature::Signer,
+    system_program,
+    sysvar,
+    transaction::Transaction,
+};
+use std::{path::Path, str::FromStr};
+use tracing::{error, info, warn};
+
+/// 启动事件处理器
+pub async fn start_processor(config: SubmitterConfig) -> Result<()> {
+    info!("Starting event processor");
+    
+    // 创建签名器和 RPC 客户端
+    let private_key = config
+        .relayer
+        .ed25519_private_key
+        .as_deref()
+        .ok_or_else(|| anyhow!("Ed25519 private key not configured"))?;
+    let signer = Ed25519Signer::new(private_key)?;
+    let rpc_client = RpcClient::new_with_commitment(
+        config.target_chain.rpc_url.clone(),
+        CommitmentConfig::confirmed(),
+    );
+    let program_id = Pubkey::from_str(&config.target_chain.contract_address)?;
+    
+    info!(
+        relayer_pubkey = %signer.keypair().pubkey(),
+        program_id = %program_id,
+        "SVM submitter initialized"
+    );
+    
+    // 创建队列目录
+    let queue_dir = &config.queue.path;
+    std::fs::create_dir_all(queue_dir)?;
+    info!(queue_path = %queue_dir.display(), "Queue directory initialized");
+    
+    // 持续处理队列中的事件
+    loop {
+        match process_queue(&config.queue.path, &signer, &rpc_client, &program_id).await {
+            Ok(processed) => {
+                if processed > 0 {
+                    info!(count = processed, "Processed events");
+                }
+            }
+            Err(e) => {
+                error!("Error processing queue: {}", e);
+            }
+        }
+        
+        // 等待后继续
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// 处理队列中的事件
+async fn process_queue(
+    queue_dir: &Path,
+    signer: &Ed25519Signer,
+    rpc_client: &RpcClient,
+    program_id: &Pubkey,
+) -> Result<usize> {
+    let mut processed = 0;
+    
+    // 读取队列目录中的所有事件文件
+    let entries = std::fs::read_dir(queue_dir)?;
+    
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            // 读取事件数据
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    match serde_json::from_str::<StakeEventData>(&content) {
+                        Ok(event) => {
+                            info!(nonce = event.nonce, "Processing event from queue");
+                            
+                            // 处理事件
+                            match submit_signature(signer, rpc_client, program_id, &event).await {
+                                Ok(tx_signature) => {
+                                    info!(
+                                        nonce = event.nonce,
+                                        tx = tx_signature,
+                                        "Event processed successfully"
+                                    );
+                                    
+                                    // 删除已处理的文件
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        warn!("Failed to remove processed file: {}", e);
+                                    }
+                                    
+                                    processed += 1;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        nonce = event.nonce,
+                                        error = %e,
+                                        "Failed to process event"
+                                    );
+                                    // 保留文件以便重试
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse event file {:?}: {}", path, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read event file {:?}: {}", path, e);
+                }
+            }
+        }
+    }
+    
+    Ok(processed)
+}
+
+/// 提交签名到 SVM
+async fn submit_signature(
+    signer: &Ed25519Signer,
+    rpc_client: &RpcClient,
+    program_id: &Pubkey,
+    event: &StakeEventData,
+) -> Result<String> {
+    // 生成签名
+    let signature = signer.sign_event(event)?;
+    
+    // 推导 PDA 账户
+    let (receiver_state, _) =
+        Pubkey::find_program_address(&[b"receiver_state"], program_id);
+
+    let (cross_chain_request, _) = Pubkey::find_program_address(
+        &[b"cross_chain_request", &event.nonce.to_le_bytes()],
+        program_id,
+    );
+
+    let (vault, _) = Pubkey::find_program_address(&[b"vault"], program_id);
+
+    // 解析 receiver_address
+    let receiver_pubkey = Pubkey::from_str(&event.receiver_address)
+        .map_err(|e| anyhow!("Invalid receiver address: {}", e))?;
+
+    // USDC mint 地址
+    let usdc_mint = Pubkey::from_str("6u1x12yV2XFcEDGd8KByZZqnjipRiq9BJB2xKprhAipy")
+        .unwrap_or(Pubkey::default());
+
+    // 推导 token accounts
+    let vault_token_account =
+        spl_associated_token_account::get_associated_token_address(&vault, &usdc_mint);
+    let receiver_token_account =
+        spl_associated_token_account::get_associated_token_address(&receiver_pubkey, &usdc_mint);
+
+    // 创建 Ed25519 验证指令
+    // 注意: 使用与 Solana web3.js 兼容的格式
+    let ed25519_ix = create_ed25519_instruction_v2(signer, event, &signature)?;
+
+    // 创建 submit_signature 指令
+    let submit_sig_ix = create_submit_signature_instruction(
+        signer.keypair().pubkey(),
+        program_id,
+        event,
+        &signature,
+        receiver_state,
+        cross_chain_request,
+        vault,
+        usdc_mint,
+        vault_token_account,
+        receiver_token_account,
+    )?;
+
+    // 获取最新 blockhash
+    let recent_blockhash = rpc_client
+        .get_latest_blockhash()
+        .map_err(|e| anyhow!("Failed to get latest blockhash: {}", e))?;
+
+    // 创建交易
+    let mut transaction = Transaction::new_with_payer(
+        &[ed25519_ix, submit_sig_ix],
+        Some(&signer.keypair().pubkey()),
+    );
+
+    // 签名交易
+    transaction.sign(&[signer.keypair()], recent_blockhash);
+
+    // 输出交易详细信息用于调试
+    info!(
+        nonce = event.nonce,
+        receiver = %receiver_pubkey,
+        amount = event.amount,
+        vault = %vault,
+        vault_token_account = %vault_token_account,
+        receiver_token_account = %receiver_token_account,
+        "Submitting transaction with accounts"
+    );
+
+    // 先模拟交易以获取详细错误信息
+    match rpc_client.simulate_transaction(&transaction) {
+        Ok(sim_result) => {
+            if let Some(err) = sim_result.value.err {
+                error!(
+                    nonce = event.nonce,
+                    error = ?err,
+                    logs = ?sim_result.value.logs,
+                    "Transaction simulation failed"
+                );
+                return Err(anyhow!("Transaction simulation failed: {:?}\nLogs: {:?}", err, sim_result.value.logs));
+            }
+            info!(nonce = event.nonce, "Transaction simulation succeeded");
+        }
+        Err(e) => {
+            warn!(nonce = event.nonce, error = %e, "Failed to simulate transaction, proceeding anyway");
+        }
+    }
+
+    // 发送交易
+    match rpc_client.send_and_confirm_transaction(&transaction) {
+        Ok(sig) => {
+            info!(nonce = event.nonce, tx = %sig, "Transaction confirmed");
+            Ok(sig.to_string())
+        }
+        Err(e) => {
+            error!(nonce = event.nonce, error = %e, "Failed to send transaction");
+            Err(anyhow!("Failed to send transaction: {}", e))
+        }
+    }
+}
+
+/// 创建 Ed25519 验证指令 (V2 - 使用标准格式)
+/// 这个格式与 Solana web3.js 的 Ed25519Program.createInstructionWithPublicKey 兼容
+fn create_ed25519_instruction_v2(
+    signer: &Ed25519Signer,
+    event: &StakeEventData,
+    signature: &[u8],
+) -> Result<Instruction> {
+    // 序列化事件数据 - 这是要验证的原始消息
+    let message = event.try_to_vec()?;
+    let pubkey_bytes = signer.keypair().pubkey().to_bytes();
+
+    // 常量定义（与 Solana SDK 一致）
+    const DATA_START: usize = 16;  // 2 (num_signatures + padding) + 14 (offsets struct)
+    const PUBKEY_SIZE: usize = 32;
+    const SIGNATURE_SIZE: usize = 64;
+
+    let public_key_offset = DATA_START;
+    let signature_offset = public_key_offset + PUBKEY_SIZE;
+    let message_data_offset = signature_offset + SIGNATURE_SIZE;
+
+    let mut instruction_data = Vec::with_capacity(
+        DATA_START + PUBKEY_SIZE + SIGNATURE_SIZE + message.len()
+    );
+
+    // 1. num_signatures (u8) = 1
+    instruction_data.push(1u8);
+    // 2. padding (u8) = 0
+    instruction_data.push(0u8);
+
+    // 3. Ed25519SignatureOffsets 结构体 (14 bytes)
+    // 使用 u16::MAX 表示数据在同一指令中
+    instruction_data.extend_from_slice(&(signature_offset as u16).to_le_bytes());      // signature_offset
+    instruction_data.extend_from_slice(&u16::MAX.to_le_bytes());                        // signature_instruction_index
+    instruction_data.extend_from_slice(&(public_key_offset as u16).to_le_bytes());     // public_key_offset
+    instruction_data.extend_from_slice(&u16::MAX.to_le_bytes());                        // public_key_instruction_index
+    instruction_data.extend_from_slice(&(message_data_offset as u16).to_le_bytes());   // message_data_offset
+    instruction_data.extend_from_slice(&(message.len() as u16).to_le_bytes());         // message_data_size
+    instruction_data.extend_from_slice(&u16::MAX.to_le_bytes());                        // message_instruction_index
+
+    // 4. 数据部分: pubkey -> signature -> message
+    instruction_data.extend_from_slice(&pubkey_bytes);      // public key (32 bytes)
+    instruction_data.extend_from_slice(signature);          // signature (64 bytes)
+    instruction_data.extend_from_slice(&message);           // message (variable)
+
+    // Ed25519Program ID
+    let ed25519_program_id = Pubkey::new_from_array([
+        3, 125, 70, 214, 124, 147, 251, 190,
+        18, 249, 66, 143, 131, 141, 64, 255,
+        5, 112, 116, 73, 39, 244, 138, 100,
+        252, 202, 112, 68, 128, 0, 0, 0,
+    ]);
+
+    Ok(Instruction {
+        program_id: ed25519_program_id,
+        accounts: vec![],
+        data: instruction_data,
+    })
+}
+
+/// 创建 submit_signature 指令
+#[allow(clippy::too_many_arguments)]
+fn create_submit_signature_instruction(
+    relayer_pubkey: Pubkey,
+    program_id: &Pubkey,
+    event: &StakeEventData,
+    signature: &[u8],
+    receiver_state: Pubkey,
+    cross_chain_request: Pubkey,
+    vault: Pubkey,
+    usdc_mint: Pubkey,
+    vault_token_account: Pubkey,
+    receiver_token_account: Pubkey,
+) -> Result<Instruction> {
+    // Anchor 指令 discriminator (从 IDL 获取)
+    // submit_signature 的 discriminator
+    let discriminator: [u8; 8] = [205, 224, 80, 14, 239, 119, 52, 129];
+
+    // 序列化参数
+    // 函数签名: submit_signature(ctx, nonce: u64, event_data: StakeEventData, signature: Vec<u8>)
+    let mut data = Vec::new();
+    data.extend_from_slice(&discriminator);
+    event.nonce.serialize(&mut data)?;      // 参数 1: nonce (u64)
+    event.serialize(&mut data)?;             // 参数 2: event_data (StakeEventData)
+    signature.to_vec().serialize(&mut data)?; // 参数 3: signature (Vec<u8>)
+
+    // 构建账户列表
+    let accounts = vec![
+        AccountMeta::new(receiver_state, false),
+        AccountMeta::new(cross_chain_request, false),
+        AccountMeta::new(relayer_pubkey, true),
+        AccountMeta::new(vault, false),
+        AccountMeta::new_readonly(usdc_mint, false),
+        AccountMeta::new(vault_token_account, false),
+        AccountMeta::new(receiver_token_account, false),
+        AccountMeta::new_readonly(sysvar::instructions::ID, false),
+        AccountMeta::new_readonly(spl_token::ID, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data,
+    })
+}
+

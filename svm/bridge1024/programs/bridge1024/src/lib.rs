@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, Transfer};
 use anchor_spl::token::TokenAccount;
 
-declare_id!("CuvmS8Hehjf1HXjqBMKtssCK4ZS4cqDxkpQ6QLHmRUEB");
+declare_id!("BvYhYzzQerwUkX15zQJv5vuDiwR71daF1Z1ChPMnhQMt");
 
 #[program]
 pub mod bridge1024 {
@@ -17,7 +17,7 @@ pub mod bridge1024 {
         sender_state.admin = ctx.accounts.admin.key();
         sender_state.nonce = 0;
         sender_state.usdc_mint = Pubkey::default();
-        sender_state.target_contract = Pubkey::default();
+        sender_state.target_contract = String::new();
         sender_state.source_chain_id = 0;
         sender_state.target_chain_id = 0;
 
@@ -27,7 +27,7 @@ pub mod bridge1024 {
         receiver_state.last_nonce = 0;
         receiver_state.relayer_count = 0;
         receiver_state.usdc_mint = Pubkey::default();
-        receiver_state.source_contract = Pubkey::default();
+        receiver_state.source_contract = String::new();
         receiver_state.source_chain_id = 0;
         receiver_state.target_chain_id = 0;
         receiver_state.relayers = Vec::new();
@@ -47,22 +47,40 @@ pub mod bridge1024 {
 
     pub fn configure_peer(
         ctx: Context<ConfigurePeer>,
-        peer_contract: Pubkey,
+        peer_contract: String,
         source_chain_id: u64,
         target_chain_id: u64,
     ) -> Result<()> {
         let sender_state = &mut ctx.accounts.sender_state;
         let receiver_state = &mut ctx.accounts.receiver_state;
 
-        // Configure sender state
-        sender_state.target_contract = peer_contract;
-        sender_state.source_chain_id = source_chain_id;
-        sender_state.target_chain_id = target_chain_id;
+        // Configure sender state (for SVM → EVM transfers)
+        sender_state.target_contract = peer_contract.clone();
+        sender_state.source_chain_id = source_chain_id;  // SVM chain ID
+        sender_state.target_chain_id = target_chain_id;  // EVM chain ID
 
-        // Configure receiver state
+        // Configure receiver state (for EVM → SVM transfers)
+        // Note: Chain IDs are swapped for receiver since it receives from EVM
         receiver_state.source_contract = peer_contract;
-        receiver_state.source_chain_id = source_chain_id;
-        receiver_state.target_chain_id = target_chain_id;
+        receiver_state.source_chain_id = target_chain_id;  // EVM chain ID (source of incoming events)
+        receiver_state.target_chain_id = source_chain_id;  // SVM chain ID (target of incoming events)
+
+        Ok(())
+    }
+
+    // Simplified function to configure only receiver state (for EVM → SVM)
+    pub fn configure_receiver_peer(
+        ctx: Context<ConfigureReceiverPeer>,
+        peer_contract: String,
+        source_chain_id: u64,  // EVM chain ID
+        target_chain_id: u64,  // SVM chain ID
+    ) -> Result<()> {
+        let receiver_state = &mut ctx.accounts.receiver_state;
+
+        // Configure receiver state for incoming transfers from EVM
+        receiver_state.source_contract = peer_contract;
+        receiver_state.source_chain_id = source_chain_id;  // EVM chain ID
+        receiver_state.target_chain_id = target_chain_id;  // SVM chain ID
 
         Ok(())
     }
@@ -97,8 +115,8 @@ pub mod bridge1024 {
 
         // Emit event
         emit!(StakeEvent {
-            source_contract: *ctx.program_id,
-            target_contract: sender_state.target_contract,
+            source_contract: ctx.program_id.to_string(),
+            target_contract: sender_state.target_contract.clone(),
             chain_id: sender_state.source_chain_id,
             block_height: Clock::get()?.slot,
             amount,
@@ -484,6 +502,19 @@ pub struct ConfigurePeer<'info> {
 }
 
 #[derive(Accounts)]
+pub struct ConfigureReceiverPeer<'info> {
+    #[account(
+        mut,
+        seeds = [b"receiver_state"],
+        bump,
+        has_one = admin @ ErrorCode::Unauthorized
+    )]
+    pub receiver_state: Account<'info, ReceiverState>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct Stake<'info> {
     #[account(
         mut,
@@ -631,13 +662,19 @@ pub struct SenderState {
     pub admin: Pubkey,
     pub usdc_mint: Pubkey,
     pub nonce: u64,
-    pub target_contract: Pubkey,
+    pub target_contract: String,
     pub source_chain_id: u64,
     pub target_chain_id: u64,
 }
 
 impl SenderState {
-    pub const LEN: usize = 32 + 32 + 32 + 8 + 32 + 8 + 8; // 152 bytes
+    pub const LEN: usize = 32 + // vault
+        32 + // admin
+        32 + // usdc_mint
+        8 + // nonce
+        4 + 64 + // target_contract (String max 64 chars)
+        8 + // source_chain_id
+        8; // target_chain_id
 }
 
 #[account]
@@ -646,7 +683,7 @@ pub struct ReceiverState {
     pub admin: Pubkey,
     pub usdc_mint: Pubkey,
     pub relayer_count: u64,
-    pub source_contract: Pubkey,
+    pub source_contract: String,
     pub source_chain_id: u64,
     pub target_chain_id: u64,
     pub relayers: Vec<Pubkey>,
@@ -654,7 +691,14 @@ pub struct ReceiverState {
 }
 
 impl ReceiverState {
-    pub const BASE_LEN: usize = 32 + 32 + 32 + 8 + 32 + 8 + 8 + 8; // 160 bytes
+    pub const BASE_LEN: usize = 32 + // vault
+        32 + // admin
+        32 + // usdc_mint
+        8 + // relayer_count
+        4 + 64 + // source_contract (String max 64 chars)
+        8 + // source_chain_id
+        8 + // target_chain_id
+        8; // last_nonce
     pub const MAX_RELAYERS: usize = 18;
     pub const LEN: usize = Self::BASE_LEN 
         + 4 + (32 * Self::MAX_RELAYERS); // relayers Vec (Ed25519 public keys are in Pubkey)
@@ -680,8 +724,8 @@ impl CrossChainRequest {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct StakeEventData {
-    pub source_contract: Pubkey,
-    pub target_contract: Pubkey,
+    pub source_contract: String,
+    pub target_contract: String,
     pub source_chain_id: u64,
     pub target_chain_id: u64,
     pub block_height: u64,
@@ -691,8 +735,9 @@ pub struct StakeEventData {
 }
 
 impl StakeEventData {
-    pub const LEN: usize = 32 + // source_contract
-        32 + // target_contract
+    pub const LEN: usize = 
+        4 + 64 + // source_contract (String with max 64 chars - hex encoded)
+        4 + 64 + // target_contract (String with max 64 chars - hex encoded)
         8 + // source_chain_id
         8 + // target_chain_id
         8 + // block_height
@@ -729,8 +774,8 @@ pub enum ErrorCode {
 
 #[event]
 pub struct StakeEvent {
-    pub source_contract: Pubkey,
-    pub target_contract: Pubkey,
+    pub source_contract: String,
+    pub target_contract: String,
     pub chain_id: u64,
     pub block_height: u64,
     pub amount: u64,

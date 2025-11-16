@@ -34,22 +34,36 @@
 ### 统一合约
 
 - `initialize(vaultAddress, adminAddress)` - 统一初始化发送端和接收端
+  - **注意**：从 v2.0 开始，`vaultAddress` 参数已废弃，合约本身作为金库
+  - 合约内部使用 `address(this)` 作为金库地址
 - `configureUsdc(usdcAddress)` - 配置 USDC ERC20 合约地址
 - `configurePeer(peerContract, sourceChainId, targetChainId)` - 配置对端合约和链ID
 
 ### 发送端功能
 
 - `stake(amount, receiverAddress)` - 质押 USDC 发起跨链转账
-- 自动递增 nonce
-- 触发 `StakeEvent` 事件
+  - 用户的 USDC 直接转入合约地址（合约作为金库）
+  - 自动递增 nonce
+  - 触发 `StakeEvent` 事件
 
 ### 接收端功能
 
-- `addRelayer(relayerAddress, ecdsaPubkey)` - 添加 Relayer 到白名单
+- `addRelayer(relayerAddress)` - 添加 Relayer 到白名单
 - `removeRelayer(relayerAddress)` - 从白名单移除 Relayer
 - `submitSignature(eventData, signature)` - 提交签名，达到阈值后解锁代币
+  - 合约直接使用 `transfer()` 从自身余额转出 USDC
+  - 不需要预先 approve
 - `isRelayer(address)` - 查询是否为白名单 Relayer
 - `getRelayerCount()` - 获取 Relayer 总数
+
+### 金库设计（v2.0 变更）
+
+**重要变更**：合约本身作为金库，简化了架构并提高了安全性。
+
+- ✅ **合约即金库**：`senderState.vault` 和 `receiverState.vault` 都指向 `address(this)`
+- ✅ **无需 approve**：合约使用 `transfer()` 而非 `transferFrom()` 转出代币
+- ✅ **简化部署**：不需要单独配置 vault 地址或进行 approve 操作
+- ✅ **提高安全性**：减少了外部依赖和攻击面
 
 ## 测试套件
 
@@ -170,13 +184,16 @@ forge create \
   --private-key $ADMIN_EVM_PRIVATE_KEY \
   src/Bridge1024.sol:Bridge1024
 
-# 初始化
+# 初始化（注意：vaultAddress 参数已废弃，可传入任意地址）
 cast send <CONTRACT_ADDRESS> \
   "initialize(address,address)" \
-  $EVM_VAULT_ADDRESS \
+  $EVM_ADMIN_ADDRESS \
   $EVM_ADMIN_ADDRESS \
   --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
   --private-key $ADMIN_EVM_PRIVATE_KEY
+
+# 重要：给合约地址转入 USDC 作为流动性（合约本身是金库）
+# 使用 MockUSDC 或真实 USDC 合约的 transfer 或 mint 功能
 ```
 
 详细部署文档见 [../../scripts/README.md](../../scripts/README.md#部署脚本)
@@ -210,9 +227,10 @@ cast send <CONTRACT_ADDRESS> \
 
 1. 合约已实现基本的安全机制（权限控制、nonce递增判断、签名验证）
 2. 建议在主网部署前进行完整的安全审计
-3. 金库地址应使用多签钱包（如 Gnosis Safe）
-4. 管理员地址应使用多签钱包
-5. 定期监控合约事件和状态
+3. **合约本身是金库**：需要确保合约有足够的 USDC 余额用于解锁操作
+4. 管理员地址应使用多签钱包（如 Gnosis Safe）
+5. 定期监控合约事件和余额状态
+6. **流动性管理**：管理员需要定期检查合约余额，确保有足够流动性支持跨链转账
 
 ## 许可证
 

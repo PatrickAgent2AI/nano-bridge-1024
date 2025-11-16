@@ -3,6 +3,7 @@ use std::fmt;
 
 /// 跨链事件数据 (统一格式)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "borsh", derive(borsh::BorshSerialize, borsh::BorshDeserialize))]
 pub struct StakeEventData {
     pub source_contract: String,
     pub target_contract: String,

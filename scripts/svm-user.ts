@@ -12,9 +12,10 @@ import { Program, AnchorProvider, Wallet, BN } from '@coral-xyz/anchor';
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import * as fs from 'fs';
 
 // 加载环境变量
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
 
 // IDL 类型定义（需要从实际的 IDL 文件导入）
 // import { Bridge1024 } from '../target/types/bridge1024';
@@ -24,29 +25,32 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 interface Config {
   rpcUrl: string;
   programId: PublicKey;
-  userPrivateKey: number[];
+  userKeypair: Keypair;
   usdcMint: PublicKey;
   testAmount: number;
   testReceiver: string;
 }
 
 function loadConfig(): Config {
-  const privateKeyStr = process.env.USER_SVM_PRIVATE_KEY;
-  if (!privateKeyStr) {
-    throw new Error('USER_SVM_PRIVATE_KEY not found in .env');
+  const keypairPath = process.env.USER_SVM_KEYPAIR_PATH;
+  if (!keypairPath) {
+    throw new Error('USER_SVM_KEYPAIR_PATH not found in .env.invoke');
   }
 
-  let privateKey: number[];
+  // 读取 keypair 文件
+  let keypair: Keypair;
   try {
-    privateKey = JSON.parse(privateKeyStr);
-  } catch (e) {
-    throw new Error('Invalid USER_SVM_PRIVATE_KEY format. Expected JSON array.');
+    const keypairFile = fs.readFileSync(keypairPath, 'utf-8');
+    const keypairData = JSON.parse(keypairFile);
+    keypair = Keypair.fromSecretKey(new Uint8Array(keypairData));
+  } catch (e: any) {
+    throw new Error(`Failed to load keypair from ${keypairPath}: ${e.message}`);
   }
 
   return {
     rpcUrl: process.env.SVM_RPC_URL || 'https://api.devnet.solana.com',
     programId: new PublicKey(process.env.SVM_PROGRAM_ID || ''),
-    userPrivateKey: privateKey,
+    userKeypair: keypair,
     usdcMint: new PublicKey(process.env.USDC_SVM_MINT || ''),
     testAmount: parseInt(process.env.TEST_STAKE_AMOUNT || '1000000'),
     testReceiver: process.env.TEST_RECEIVER_ADDRESS_EVM || '0x0000000000000000000000000000000000000000',
@@ -54,6 +58,17 @@ function loadConfig(): Config {
 }
 
 // ============ 辅助函数 ============
+
+/**
+ * 创建 Solana Connection，禁用 WebSocket 以避免 405 错误
+ */
+function createConnection(rpcUrl: string): Connection {
+  return new Connection(rpcUrl, {
+    commitment: 'confirmed',
+    wsEndpoint: undefined, // 禁用 WebSocket，避免 ws error: 405
+    confirmTransactionInitialTimeout: 120000,
+  });
+}
 
 function printHeader(title: string) {
   console.log('\n============================================');
@@ -79,10 +94,10 @@ async function stake(amount?: number, receiver?: string) {
   const receiverAddress = receiver || config.testReceiver;
 
   // 创建连接
-  const connection = new Connection(config.rpcUrl, 'confirmed');
+  const connection = createConnection(config.rpcUrl);
   
-  // 创建用户 keypair
-  const userKeypair = Keypair.fromSecretKey(new Uint8Array(config.userPrivateKey));
+  // 获取用户 keypair
+  const userKeypair = config.userKeypair;
   
   console.log('配置信息:');
   console.log(`  RPC: ${config.rpcUrl}`);
@@ -184,7 +199,7 @@ async function queryBalance() {
 
   const config = loadConfig();
   const connection = new Connection(config.rpcUrl, 'confirmed');
-  const userKeypair = Keypair.fromSecretKey(new Uint8Array(config.userPrivateKey));
+  const userKeypair = config.userKeypair;
 
   try {
     // 查询 SOL 余额
@@ -247,8 +262,11 @@ async function main() {
     }
 
     printSuccess('操作完成！');
-  } catch (error) {
-    printError(`操作失败: ${error}`);
+  } catch (error: any) {
+    printError(`操作失败: ${error?.message || error}`);
+    if (error?.stack) {
+      console.error(error.stack);
+    }
     process.exit(1);
   }
 }
@@ -259,4 +277,8 @@ if (require.main === module) {
 }
 
 export { stake, queryBalance };
+
+
+
+
 

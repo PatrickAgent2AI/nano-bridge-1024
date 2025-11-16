@@ -19,7 +19,7 @@
 
 | 模块 | 类别 | 接口名称 | 权限 | 主要参数 | 返回值/输出 | 功能效果 |
 |------|------|----------|------|----------|-------------|----------|
-| 统一合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`(PDA), `adminAddress`(多签) | 无 | 统一初始化发送端和接收端合约，设置共享PDA金库和多签管理员地址 |
+| 统一合约 | 初始化 | `initialize` | `onlyAdmin` | `vaultAddress`(已废弃/PDA), `adminAddress`(多签) | 无 | 统一初始化发送端和接收端合约。EVM端v2.0：合约本身作为金库；SVM端：使用PDA金库 |
 | 统一合约 | 配置 | `configure_usdc` | `onlyAdmin` | `usdcAddress` | 无 | 配置USDC代币地址（SVM为mint account，EVM为合约地址） |
 | 统一合约 | 配置 | `configure_peer` | `onlyAdmin` | `peerContract`, `sourceChainId`, `targetChainId` | 无 | 统一配置对端合约和链ID（同时配置发送端和接收端） |
 | 发送端合约 | 质押 | `stake` | 公开 | `amount`, `receiverAddress` | `nonce` | 质押USDC，触发`StakeEvent`事件，nonce自动递增 |
@@ -135,57 +135,54 @@ function configure_usdc(
 
 ```
 function initialize(
-    address vaultAddress,      // 质押金库地址（发送端和接收端共享）
+    address vaultAddress,      // 已废弃（v2.0），合约本身作为金库
     address adminAddress       // 管理员钱包地址（发送端和接收端共享）
 ) onlyAdmin
 ```
 
 **参数说明：**
-- `vaultAddress`：存储质押代币的金库地址（发送端和接收端共享同一个金库）
-  - **支持多签钱包**：可以是 Gnosis Safe 等多签钱包地址
-  - **合约透明性**：合约将其视为普通地址，不关心是否是多签
-  - **转账操作**：从用户地址转账到金库，从金库转账到接收地址
+- `vaultAddress`：**已废弃（v2.0）**
+  - 该参数仅为了向后兼容保留，实际值会被忽略
+  - 合约内部使用 `address(this)` 作为金库地址
+  - 可以传入任意地址，通常传入 `adminAddress`
 - `adminAddress`：具有管理权限的钱包地址（发送端和接收端共享同一个管理员）
   - **支持多签钱包**：可以是 Gnosis Safe 等多签钱包地址
-  - **合约透明性**：合约将其视为普通地址，不关心是否是多签
   - **权限检查**：合约只验证 `msg.sender == adminAddress`，多签逻辑在外部处理
 
 **权限：** 仅管理员可调用（初始化时由部署者调用）
 
 **功能描述：**
 1. 同时创建 `SenderState` 和 `ReceiverState` 状态
-2. 初始化发送端 nonce 为 0
-3. 初始化接收端 lastNonce 为 0
-4. 设置共享的 vault 和 admin 地址
+2. 将 vault 设置为 `address(this)`（合约本身）
+3. 初始化发送端 nonce 为 0
+4. 初始化接收端 lastNonce 为 0
+5. 设置 admin 地址
 
-**多签钱包支持：**
-- **完全兼容**：EVM 合约中的 `vault` 和 `admin` 地址**完全支持多签钱包**（如 Gnosis Safe）
-- **合约层面**：从合约的角度来看，多签钱包和普通 EOA（Externally Owned Account）没有区别
-- **权限检查**：合约只需要验证 `msg.sender == admin` 或 `msg.sender == vault`，不需要关心它们是否是多签
-- **多签逻辑外部化**：多签的投票、阈值检查等逻辑在外部处理（Gnosis Safe 合约），当多签通过后，会以多签钱包地址的身份调用我们的合约
+**v2.0 金库变更：**
+- ✅ **合约即金库**：`senderState.vault` 和 `receiverState.vault` 都指向 `address(this)`
+- ✅ **无需 approve**：解锁时使用 `transfer()` 而非 `transferFrom()`
+- ✅ **简化部署**：不需要单独的 vault 地址配置
+- ✅ **简化流动性管理**：直接向合约地址转入 USDC 即可
 - **使用示例**：
   ```solidity
-  // 初始化时，vault 和 admin 可以是多签钱包地址
+  // 初始化（vaultAddress 参数会被忽略）
   initialize(
-      gnosisSafeVaultAddress,  // Gnosis Safe 多签钱包地址
-      gnosisSafeAdminAddress   // Gnosis Safe 多签钱包地址
+      adminAddress,   // 传入 admin 作为占位符
+      adminAddress    // 实际使用的 admin 地址
   );
   
-  // 权限检查时，合约只验证地址，不关心是否是多签
-  modifier onlyAdmin() {
-      require(msg.sender == admin, "Only admin");
-      _;
-  }
+  // 质押时，代币转入合约本身
+  IERC20(usdc).transferFrom(msg.sender, address(this), amount);
   
-  // 转账时，从金库（可能是多签钱包）转账
-  IERC20(usdcContract).transferFrom(vault, receiver, amount);
+  // 解锁时，合约直接转账（无需 approve）
+  IERC20(usdc).transfer(receiver, amount);
   ```
 
 **优势：**
-- **向后兼容**：支持普通 EOA 和多签钱包，无需修改合约代码
-- **安全性提升**：管理员和金库可以使用多签钱包，提高资金和管理操作的安全性
-- **实现简洁**：合约保持简洁，无需处理多签提案机制
-- **灵活性**：部署时可以选择使用普通地址或多签地址，根据安全需求灵活配置
+- **简化架构**：减少了外部依赖和配置复杂度
+- **安全性提升**：减少了攻击面，不需要管理 approve 权限
+- **Gas 优化**：`transfer()` 比 `transferFrom()` 更便宜
+- **易于理解**：合约即金库，概念更清晰
 
 #### 配置USDC代币地址（EVM）
 

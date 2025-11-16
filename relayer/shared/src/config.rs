@@ -7,10 +7,15 @@ pub struct Config {
     pub service: ServiceConfig,
     pub source_chain: ChainConfig,
     pub target_chain: ChainConfig,
+    #[serde(default)]
     pub relayer: RelayerConfig,
+    #[serde(default)]
     pub queue: QueueConfig,
+    #[serde(default)]
     pub gas: GasConfig,
+    #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
     pub logging: LoggingConfig,
 }
 
@@ -31,20 +36,46 @@ pub struct ChainConfig {
     pub commitment: Option<String>, // For SVM: "finalized", "confirmed", etc.
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RelayerConfig {
     // 密钥配置
+    #[serde(default)]
     pub svm_wallet_path: Option<PathBuf>,
+    #[serde(default)]
     pub evm_private_key: Option<String>,
+    #[serde(default)]
     pub ecdsa_private_key: Option<String>,
+    #[serde(default)]
     pub ed25519_private_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueConfig {
+    #[serde(default = "default_queue_path")]
+    pub path: PathBuf,
     pub max_size: usize,
     pub retry_limit: u32,
+    #[serde(default = "default_retry_delays")]
     pub retry_delays: Vec<u64>, // milliseconds
+}
+
+fn default_queue_path() -> PathBuf {
+    PathBuf::from(".relayer/queue")
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            path: default_queue_path(),
+            max_size: 1000,
+            retry_limit: 5,
+            retry_delays: default_retry_delays(),
+        }
+    }
+}
+
+fn default_retry_delays() -> Vec<u64> {
+    vec![0, 30000, 60000, 120000, 300000]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,17 +85,63 @@ pub struct GasConfig {
     pub balance_check_interval: u64, // milliseconds
 }
 
+impl Default for GasConfig {
+    fn default() -> Self {
+        Self {
+            min_svm_balance: 5.0,
+            min_evm_balance: 0.1,
+            balance_check_interval: 300000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiConfig {
+    #[serde(default = "default_api_port")]
     pub port: u16,
+    #[serde(default)]
     pub cors_enabled: bool,
+    #[serde(default)]
     pub cors_origins: Vec<String>,
+}
+
+fn default_api_port() -> u16 {
+    8080
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            port: 8080,
+            cors_enabled: false,
+            cors_origins: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
+    #[serde(default = "default_log_level")]
     pub level: String,
+    #[serde(default = "default_log_format")]
     pub format: String, // "json" or "pretty"
+}
+
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
+fn default_log_format() -> String {
+    "text".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            format: "text".to_string(),
+        }
+    }
 }
 
 impl Config {
@@ -74,7 +151,11 @@ impl Config {
         dotenvy::dotenv().ok();
 
         let config = config::Config::builder()
-            .add_source(config::Environment::default().separator("__"))
+            .add_source(
+                config::Environment::default()
+                    .separator("__")
+                    .try_parsing(true)
+            )
             .build()
             .map_err(|e| RelayerError::Config(e.to_string()))?;
 
@@ -139,6 +220,7 @@ impl Default for Config {
                 ed25519_private_key: None,
             },
             queue: QueueConfig {
+                path: PathBuf::from(".relayer/queue"),
                 max_size: 1000,
                 retry_limit: 5,
                 retry_delays: vec![0, 30000, 60000, 120000, 300000],
