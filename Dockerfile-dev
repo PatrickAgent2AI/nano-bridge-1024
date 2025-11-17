@@ -64,9 +64,4 @@ WORKDIR /workspace
 # 暴露常用端口
 EXPOSE 8545 8546 8899 8900 9900
 
-# 启动 Docker daemon 的脚本
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["/bin/bash"]
