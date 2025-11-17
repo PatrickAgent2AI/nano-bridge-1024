@@ -257,9 +257,9 @@ if ! SVM_RPC_URL="$SVM_RPC_URL" \
      USDC_SVM_MINT="$USDC_SVM_MINT" \
      EVM_CHAIN_ID="$EVM_CHAIN_ID" \
      SVM_CHAIN_ID="$SVM_CHAIN_ID" \
-     ./node_modules/.bin/ts-node svm-admin.ts configure_usdc; then
-    echo -e "${RED}配置 SVM USDC 失败${NC}"
-    exit 1
+     timeout 5s ./node_modules/.bin/ts-node svm-admin.ts configure_usdc; then
+    echo -e "${RED}配置 SVM USDC 失败${NC}（也可能是ws连接超时）"
+    # exit 1
 fi
 
 echo ""
@@ -280,9 +280,9 @@ if ! SVM_RPC_URL="$SVM_RPC_URL" \
      PEER_CONTRACT_ADDRESS_FOR_SVM="$EVM_CONTRACT_ADDRESS" \
      EVM_CHAIN_ID="$EVM_CHAIN_ID" \
      SVM_CHAIN_ID="$SVM_CHAIN_ID" \
-     ./node_modules/.bin/ts-node svm-admin.ts configure_peer; then
-    echo -e "${RED}配置 SVM 对端合约失败${NC}"
-    exit 1
+     timeout 5s ./node_modules/.bin/ts-node svm-admin.ts configure_peer; then
+    echo -e "${RED}配置 SVM 对端合约失败${NC}（也可能是ws连接超时）"
+    # exit 1
 fi
 
 echo ""

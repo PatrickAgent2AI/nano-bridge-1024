@@ -31,8 +31,11 @@ try {
   console.warn('Warning: Could not load IDL file');
 }
 
-// 加载环境变量
-dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
+// 加载环境变量（可选，优先使用 shell 脚本设置的环境变量）
+const envPath = path.resolve(__dirname, '../.env.invoke');
+if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+}
 
 // ============ 配置 ============
 
@@ -49,9 +52,15 @@ interface Config {
 }
 
 function loadConfig(): Config {
+  // 验证必需的环境变量
   const keypairPath = process.env.ADMIN_SVM_KEYPAIR_PATH;
   if (!keypairPath) {
-    throw new Error('ADMIN_SVM_KEYPAIR_PATH not found in .env.invoke');
+    throw new Error('ADMIN_SVM_KEYPAIR_PATH environment variable not set');
+  }
+
+  const programIdStr = process.env.SVM_PROGRAM_ID;
+  if (!programIdStr) {
+    throw new Error('SVM_PROGRAM_ID environment variable not set');
   }
 
   // 读取 keypair 文件
@@ -67,11 +76,28 @@ function loadConfig(): Config {
   const relayersStr = process.env.RELAYER_ADDRESSES_SVM || '';
   const relayers = relayersStr.split(',').filter(r => r.trim());
 
+  // For initialize command, USDC_SVM_MINT is not required yet
+  const usdcMintStr = process.env.USDC_SVM_MINT || '';
+  let usdcMint: PublicKey;
+  try {
+    usdcMint = new PublicKey(usdcMintStr || '11111111111111111111111111111111');
+  } catch {
+    usdcMint = new PublicKey('11111111111111111111111111111111');
+  }
+
+  // 解析 Program ID
+  let programId: PublicKey;
+  try {
+    programId = new PublicKey(programIdStr);
+  } catch (e: any) {
+    throw new Error(`Invalid SVM_PROGRAM_ID: ${programIdStr}`);
+  }
+
   return {
     rpcUrl: process.env.SVM_RPC_URL || 'https://api.devnet.solana.com',
-    programId: new PublicKey(process.env.SVM_PROGRAM_ID || ''),
+    programId: programId,
     adminKeypair: keypair,
-    usdcMint: new PublicKey(process.env.USDC_SVM_MINT || ''),
+    usdcMint: usdcMint,
     peerContract: process.env.PEER_CONTRACT_ADDRESS_FOR_SVM || '',
     sourceChainId: parseInt(process.env.SVM_CHAIN_ID || '91024'),
     targetChainId: parseInt(process.env.EVM_CHAIN_ID || '421614'),
@@ -89,8 +115,75 @@ function createConnection(rpcUrl: string): Connection {
   return new Connection(rpcUrl, {
     commitment: 'confirmed',
     wsEndpoint: undefined, // 禁用 WebSocket，避免 ws error: 405
-    confirmTransactionInitialTimeout: 120000,
+    confirmTransactionInitialTimeout: 5000, // 5 秒超时
   });
+}
+
+/**
+ * 发送交易并等待确认（带 5 秒超时）
+ */
+async function sendAndConfirmTransaction(
+  connection: Connection,
+  transaction: any,
+  signers: Keypair[],
+  rpcUrl: string
+): Promise<string> {
+  // 获取最新的 blockhash
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = signers[0].publicKey;
+
+  // 签名交易
+  transaction.sign(...signers);
+
+  // 发送交易
+  const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+    maxRetries: 2,
+  });
+
+  console.log(`📤 交易已发送: ${txSignature}`);
+  console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(rpcUrl)}`);
+  console.log('⏳ 等待交易确认（5秒超时）...');
+
+  // 设置 5 秒超时
+  const confirmationPromise = connection.confirmTransaction({
+    signature: txSignature,
+    blockhash,
+    lastValidBlockHeight,
+  }, 'confirmed');
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('Transaction confirmation timeout after 5 seconds')), 5000);
+  });
+
+  try {
+    const confirmation = await Promise.race([confirmationPromise, timeoutPromise]);
+    
+    if (confirmation.value.err) {
+      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    }
+
+    console.log('✅ 交易已确认！');
+    return txSignature;
+  } catch (error: any) {
+    if (error.message.includes('timeout')) {
+      // 超时后尝试获取交易状态
+      console.log('⏱️  确认超时，检查交易状态...');
+      try {
+        const status = await connection.getSignatureStatus(txSignature);
+        if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
+          console.log('✅ 交易已确认（通过状态查询）！');
+          return txSignature;
+        }
+        throw new Error(`Transaction not confirmed within timeout. Status: ${status.value?.confirmationStatus || 'unknown'}`);
+      } catch (statusError: any) {
+        throw new Error(`Transaction confirmation timeout and status check failed: ${statusError.message}`);
+      }
+    }
+    throw error;
+  }
 }
 
 function printHeader(title: string) {
@@ -152,7 +245,9 @@ async function initialize() {
       throw new Error('IDL file not found. Please build SVM contract first');
     }
 
-    const program = new Program(IDL, provider);
+    // 使用实际部署的 Program ID，覆盖 IDL 中的地址
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     // 构建交易
     const transaction = await program.methods
@@ -166,34 +261,13 @@ async function initialize() {
       })
       .transaction();
 
-    // 获取最新的 blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
-
-    // 签名交易
-    transaction.sign(adminKeypair);
-
-    // 发送交易（立即返回交易签名，不等待确认）
-    const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-
-    console.log(`📤 交易已发送: ${txSignature}`);
-    console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-    console.log('⏳ 等待交易确认...');
-
-    // 等待交易确认
-    const confirmation = await connection.confirmTransaction({
-      signature: txSignature,
-      blockhash,
-      lastValidBlockHeight,
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
 
     printSuccess('合约初始化成功！');
     console.log(`  Transaction: ${txSignature}`);
@@ -233,7 +307,8 @@ async function configureUsdc() {
 
     const wallet = new Wallet(adminKeypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
-    const program = new Program(IDL, provider);
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     // 构建交易
     const transaction = await program.methods
@@ -246,34 +321,13 @@ async function configureUsdc() {
       })
       .transaction();
 
-    // 获取最新的 blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
-
-    // 签名交易
-    transaction.sign(adminKeypair);
-
-    // 发送交易（立即返回交易签名，不等待确认）
-    const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-
-    console.log(`📤 交易已发送: ${txSignature}`);
-    console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-    console.log('⏳ 等待交易确认...');
-
-    // 等待交易确认
-    const confirmation = await connection.confirmTransaction({
-      signature: txSignature,
-      blockhash,
-      lastValidBlockHeight,
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
 
     printSuccess('USDC 配置成功！');
     console.log(`  Transaction: ${txSignature}`);
@@ -315,7 +369,8 @@ async function configurePeer() {
     const connection = createConnection(config.rpcUrl);
     const wallet = new Wallet(adminKeypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
-    const program = new Program(IDL, provider);
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     const [senderState] = PublicKey.findProgramAddressSync(
       [Buffer.from('sender_state')],
@@ -341,35 +396,13 @@ async function configurePeer() {
       })
       .transaction();
 
-    // 获取最新的 blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
-
-    // 签名交易
-    transaction.sign(adminKeypair);
-
-    // 发送交易 - Try with skipPreflight to bypass simulation error
-    console.log('⚠️  尝试跳过模拟检查...');
-    const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: true,  // Skip preflight to bypass simulation error
-      maxRetries: 3,
-    });
-
-    console.log(`📤 交易已发送: ${txSignature}`);
-    console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-    console.log('⏳ 等待交易确认...');
-
-    // 等待交易确认
-    const confirmation = await connection.confirmTransaction({
-      signature: txSignature,
-      blockhash,
-      lastValidBlockHeight,
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
 
     printSuccess('对端合约配置成功！');
     console.log(`  Transaction: ${txSignature}`);
@@ -405,7 +438,8 @@ async function addRelayer(relayerAddress?: string) {
   const connection = createConnection(config.rpcUrl);
   const wallet = new Wallet(adminKeypair);
   const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
-  const program = new Program(IDL, provider);
+  const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+  const program = new Program(idlWithCorrectAddress, provider);
 
   try {
     const [receiverState] = PublicKey.findProgramAddressSync(
@@ -427,34 +461,13 @@ async function addRelayer(relayerAddress?: string) {
         })
         .transaction();
 
-      // 获取最新的 blockhash
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = adminKeypair.publicKey;
-
-      // 签名交易
-      transaction.sign(adminKeypair);
-
-      // 发送交易（立即返回交易签名，不等待确认）
-      const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-        skipPreflight: false,
-        preflightCommitment: 'confirmed',
-      });
-
-      console.log(`📤 交易已发送: ${txSignature}`);
-      console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-      console.log('⏳ 等待交易确认...');
-
-      // 等待交易确认
-      const confirmation = await connection.confirmTransaction({
-        signature: txSignature,
-        blockhash,
-        lastValidBlockHeight,
-      }, 'confirmed');
-
-      if (confirmation.value.err) {
-        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-      }
+      // 发送交易并等待确认（5秒超时）
+      const txSignature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [adminKeypair],
+        config.rpcUrl
+      );
 
       printSuccess(`Relayer ${relayer} 添加成功！`);
       console.log(`  Transaction: ${txSignature}`);
@@ -550,7 +563,8 @@ async function addLiquidity(amount?: number) {
     const connection = createConnection(config.rpcUrl);
     const wallet = new Wallet(adminKeypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
-    const program = new Program(IDL, provider);
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     // 构建交易
     const transaction = await program.methods
@@ -566,34 +580,13 @@ async function addLiquidity(amount?: number) {
       })
       .transaction();
 
-    // 获取最新的 blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
-
-    // 签名交易
-    transaction.sign(adminKeypair);
-
-    // 发送交易（立即返回交易签名，不等待确认）
-    const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-
-    console.log(`📤 交易已发送: ${txSignature}`);
-    console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-    console.log('⏳ 等待交易确认...');
-
-    // 等待交易确认
-    const confirmation = await connection.confirmTransaction({
-      signature: txSignature,
-      blockhash,
-      lastValidBlockHeight,
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
 
     printSuccess('流动性添加成功！');
     console.log(`  Transaction: ${txSignature}`);
@@ -689,7 +682,8 @@ async function configureReceiverPeer() {
     const connection = createConnection(config.rpcUrl);
     const wallet = new Wallet(adminKeypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
-    const program = new Program(IDL, provider);
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     const [receiverState] = PublicKey.findProgramAddressSync(
       [Buffer.from('receiver_state')],
@@ -709,37 +703,16 @@ async function configureReceiverPeer() {
       })
       .transaction();
 
-    // Get latest blockhash
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = adminKeypair.publicKey;
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
 
-    // Sign transaction
-    transaction.sign(adminKeypair);
-
-    // Send transaction
-    const txSignature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: 'confirmed',
-    });
-
-    console.log(`📤 交易已发送: ${txSignature}`);
-    console.log(`   查看交易: https://explorer.solana.com/tx/${txSignature}?cluster=custom&customUrl=${encodeURIComponent(config.rpcUrl)}`);
-    console.log('⏳ 等待交易确认...');
-
-    // Wait for confirmation
-    const confirmation = await connection.confirmTransaction({
-      signature: txSignature,
-      blockhash,
-      lastValidBlockHeight,
-    }, 'confirmed');
-
-    if (confirmation.value.err) {
-      throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    }
-
-    console.log('✅ 交易已确认！');
     printSuccess('接收端对端配置完成！');
+    console.log(`  Transaction: ${txSignature}`);
   } catch (error: any) {
     printError(`配置接收端对端失败: ${error.message || error}`);
     throw error;
@@ -757,7 +730,8 @@ async function queryState() {
       commitment: 'confirmed',
     });
 
-    const program = new Program(IDL, provider);
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
     const [senderState] = PublicKey.findProgramAddressSync(
       [Buffer.from('sender_state')],

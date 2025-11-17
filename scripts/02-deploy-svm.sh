@@ -26,6 +26,39 @@ ADMIN_KEYPAIR="${SVM_KEYPAIR_PATH:-/root/.config/solana/id.json}"
 REQUIRED_BALANCE=5
 
 # ==============================================================================
+# 检查 Program ID 一致性
+# ==============================================================================
+
+# 如果 keypair 文件存在，检查它与配置文件中的 Program ID 是否一致
+if [ -f "$KEYPAIR_PATH" ] && [ -n "$SVM_PROGRAM_ID" ]; then
+    KEYPAIR_PROGRAM_ID=$(solana address -k "$KEYPAIR_PATH" 2>/dev/null || echo "")
+    if [ -n "$KEYPAIR_PROGRAM_ID" ] && [ "$KEYPAIR_PROGRAM_ID" != "$SVM_PROGRAM_ID" ]; then
+        echo -e "${YELLOW}========================================${NC}"
+        echo -e "${YELLOW}⚠ Program ID 不一致警告${NC}"
+        echo -e "${YELLOW}========================================${NC}"
+        echo ""
+        echo "检测到配置不一致："
+        echo "  配置文件 (.env.svm.deploy): $SVM_PROGRAM_ID"
+        echo "  Keypair 文件:                $KEYPAIR_PROGRAM_ID"
+        echo ""
+        echo -e "${YELLOW}这可能导致合约调用失败！${NC}"
+        echo ""
+        echo "建议操作："
+        echo "  1) 删除 keypair 文件，重新生成（选项2）"
+        echo "  2) 继续使用现有 keypair（会自动更新配置）"
+        echo ""
+        read -p "是否继续？[y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "${RED}操作已取消${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}将在部署后自动同步所有配置...${NC}"
+        echo ""
+    fi
+fi
+
+# ==============================================================================
 # 检查依赖
 # ==============================================================================
 
@@ -104,6 +137,8 @@ fi
 # 检查并处理程序密钥对
 # ==============================================================================
 
+NEED_UPDATE_DECLARE_ID=false
+
 # 检查是否已存在程序密钥对
 if [ -f "$KEYPAIR_PATH" ]; then
     OLD_PROGRAM_ID=$(solana address -k "$KEYPAIR_PATH" 2>/dev/null || echo "unknown")
@@ -130,6 +165,7 @@ if [ -f "$KEYPAIR_PATH" ]; then
         NEW_PROGRAM_ID=$(solana address -k "$KEYPAIR_PATH")
         echo -e "${GREEN}✓ 新程序ID: $NEW_PROGRAM_ID${NC}"
         echo ""
+        NEED_UPDATE_DECLARE_ID=true
     else
         echo -e "${GREEN}✓ 将使用现有程序ID进行升级部署${NC}"
         echo ""
@@ -141,14 +177,51 @@ else
     NEW_PROGRAM_ID=$(solana address -k "$KEYPAIR_PATH")
     echo -e "${GREEN}✓ 新程序ID: $NEW_PROGRAM_ID${NC}"
     echo ""
+    NEED_UPDATE_DECLARE_ID=true
+fi
+
+# 获取当前 Program ID
+CURRENT_PROGRAM_ID=$(solana address -k "$KEYPAIR_PATH" 2>/dev/null)
+
+# ==============================================================================
+# 检查并更新 declare_id!
+# ==============================================================================
+
+cd "$CONTRACT_DIR" || exit 1
+
+LIB_RS_PATH="$CONTRACT_DIR/programs/bridge1024/src/lib.rs"
+
+# 从 lib.rs 中提取当前的 declare_id
+if [ -f "$LIB_RS_PATH" ]; then
+    DECLARED_ID=$(grep -oP 'declare_id!\("\K[^"]+' "$LIB_RS_PATH" 2>/dev/null || echo "")
+    
+    if [ -n "$DECLARED_ID" ] && [ "$DECLARED_ID" != "$CURRENT_PROGRAM_ID" ]; then
+        echo -e "${YELLOW}检测到 declare_id! 与 keypair 不匹配${NC}"
+        echo "  lib.rs 中: $DECLARED_ID"
+        echo "  keypair:  $CURRENT_PROGRAM_ID"
+        NEED_UPDATE_DECLARE_ID=true
+    fi
+fi
+
+if [ "$NEED_UPDATE_DECLARE_ID" = true ]; then
+    echo ""
+    echo -e "${YELLOW}更新 Rust 代码中的 declare_id!...${NC}"
+    
+    if [ -f "$LIB_RS_PATH" ]; then
+        # 使用 sed 更新 declare_id!
+        sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$CURRENT_PROGRAM_ID\")/" "$LIB_RS_PATH"
+        echo -e "${GREEN}✓ 已更新 declare_id! 为: $CURRENT_PROGRAM_ID${NC}"
+    else
+        echo -e "${RED}错误: 找不到 lib.rs 文件${NC}"
+        exit 1
+    fi
 fi
 
 # ==============================================================================
 # 编译合约
 # ==============================================================================
 
-cd "$CONTRACT_DIR" || exit 1
-
+echo ""
 echo "编译合约..."
 if ! anchor build > /dev/null 2>&1; then
     echo -e "${RED}错误: 合约编译失败${NC}"
@@ -192,12 +265,56 @@ fi
 echo -e "${GREEN}✓ 部署成功${NC}"
 
 # ==============================================================================
+# 初始化合约
+# ==============================================================================
+
+echo ""
+echo "初始化合约..."
+echo "  程序ID: $PROGRAM_ID"
+echo "  管理员: $ADMIN_ADDRESS"
+echo ""
+
+# 切换到 scripts 目录执行初始化
+cd "$SCRIPT_DIR" || exit 1
+
+# 设置环境变量供 svm-admin.ts 使用
+export SVM_RPC_URL="$RPC_URL"
+export SVM_PROGRAM_ID="$PROGRAM_ID"
+export ADMIN_SVM_KEYPAIR_PATH="$ADMIN_KEYPAIR"
+
+# 调用 initialize - 显示实时输出
+if ./node_modules/.bin/ts-node svm-admin.ts initialize; then
+    echo ""
+    echo -e "${GREEN}✓ 合约初始化成功${NC}"
+else
+    INIT_EXIT=$?
+    echo ""
+    echo -e "${RED}错误: 合约初始化失败（退出码: $INIT_EXIT）${NC}"
+    echo -e "${YELLOW}提示: 如果错误是账户已存在 (0x0)，可能是合约已经初始化过了${NC}"
+    echo -e "${YELLOW}      你可以继续下一步，或者使用选项2生成新的程序ID重新部署${NC}"
+    exit 1
+fi
+
+echo ""
+
+# 回到合约目录
+cd "$CONTRACT_DIR" || exit 1
+
+# ==============================================================================
 # 更新配置文件
 # ==============================================================================
 
 echo "更新配置文件..."
 
+# 检查配置文件中的 Program ID 是否与 keypair 一致
 if [ -f "$SVM_CONFIG_FILE" ] && grep -q "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE"; then
+    CONFIG_PROGRAM_ID=$(grep "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE" | cut -d'=' -f2)
+    if [ -n "$CONFIG_PROGRAM_ID" ] && [ "$CONFIG_PROGRAM_ID" != "$PROGRAM_ID" ]; then
+        echo -e "${YELLOW}⚠ 检测到配置文件中的 Program ID 与 keypair 不一致${NC}"
+        echo "  配置文件: $CONFIG_PROGRAM_ID"
+        echo "  Keypair:  $PROGRAM_ID"
+        echo -e "${YELLOW}  将使用 keypair 中的 Program ID 更新所有配置...${NC}"
+    fi
     sed -i "s|^SVM_PROGRAM_ID=.*|SVM_PROGRAM_ID=${PROGRAM_ID}|g" "$SVM_CONFIG_FILE"
 else
     echo "SVM_PROGRAM_ID=${PROGRAM_ID}" >> "$SVM_CONFIG_FILE"
@@ -262,6 +379,40 @@ if [ $UPDATED_COUNT -eq 0 ]; then
     echo -e "${YELLOW}⚠ 未找到 Relayer 配置文件，跳过同步${NC}"
 else
     echo -e "${GREEN}✓ 已同步 $UPDATED_COUNT 个 Relayer 配置文件${NC}"
+fi
+
+# ==============================================================================
+# 验证 Program ID 一致性
+# ==============================================================================
+
+echo ""
+echo "验证 Program ID 一致性..."
+
+# 从各个源读取 Program ID
+KEYPAIR_ID=$(solana address -k "$KEYPAIR_PATH" 2>/dev/null || echo "N/A")
+CONFIG_ID=$(grep "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 || echo "N/A")
+DECLARED_ID=$(grep -oP 'declare_id!\("\K[^"]+' "$LIB_RS_PATH" 2>/dev/null || echo "N/A")
+IDL_ID=$(grep '"address"' "$CONTRACT_DIR/target/idl/bridge1024.json" 2>/dev/null | head -1 | grep -oP '"\K[A-Za-z0-9]+' || echo "N/A")
+
+# 检查一致性
+CONSISTENCY_OK=true
+if [ "$KEYPAIR_ID" = "N/A" ] || [ "$CONFIG_ID" = "N/A" ] || [ "$DECLARED_ID" = "N/A" ] || [ "$IDL_ID" = "N/A" ]; then
+    CONSISTENCY_OK=false
+elif [ "$KEYPAIR_ID" != "$CONFIG_ID" ] || [ "$KEYPAIR_ID" != "$DECLARED_ID" ] || [ "$KEYPAIR_ID" != "$IDL_ID" ]; then
+    CONSISTENCY_OK=false
+fi
+
+if [ "$CONSISTENCY_OK" = true ]; then
+    echo -e "${GREEN}✓ 所有 Program ID 已同步一致${NC}"
+    echo "  Program ID: ${GREEN}${PROGRAM_ID}${NC}"
+else
+    echo -e "${RED}✗ Program ID 不一致${NC}"
+    echo "  Keypair 文件:     $KEYPAIR_ID"
+    echo "  配置文件:         $CONFIG_ID"
+    echo "  declare_id!:      $DECLARED_ID"
+    echo "  IDL 文件:         $IDL_ID"
+    echo ""
+    echo -e "${YELLOW}⚠ 请检查上述不一致问题${NC}"
 fi
 
 # ==============================================================================

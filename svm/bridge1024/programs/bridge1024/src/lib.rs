@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, Transfer};
 use anchor_spl::token::TokenAccount;
 
-declare_id!("BvYhYzzQerwUkX15zQJv5vuDiwR71daF1Z1ChPMnhQMt");
+declare_id!("CSVrt4jV5omF1HUBGmAp9BtDj2qabDmuCzpgF4xFn1NE");
 
 #[program]
 pub mod bridge1024 {

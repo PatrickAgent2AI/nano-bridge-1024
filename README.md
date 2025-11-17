@@ -140,6 +140,16 @@ solana-keygen new -o ~/.config/solana/id.json
 ### 一键部署流程
 
 ```bash
+cp .env.evm.deploy.example .env.evm.deploy
+cp .env.svm.deploy.example .env.svm.deploy
+cp .env.invoke.example .env.invoke
+cp .env.config-usdc-peer.example .env.config-usdc-peer
+# 填写缺失的配置
+vim .env.evm.deploy  
+vim .env.svm.deploy  
+vim .env.invoke  
+vim .env.config-usdc-peer  
+
 cd scripts
 
 # 1. 部署 EVM 合约
@@ -149,20 +159,28 @@ cd scripts
 ./02-deploy-svm.sh
 
 # 3. 配置 USDC 和对端地址
-cp .env.config-usdc-peer.example .env.config-usdc-peer
-vim .env.config-usdc-peer  # 填写 USDC 地址
+cd -
+cd scripts
 ./03-config-usdc-peer.sh
 
 # 4. 注册 Relayer（自动生成密钥）
 ./04-register-relayer.sh
+# 之后假设 relayer 账户拥有充足的SOL和ETH支付交易费，因此需要手动向这些账户充值
 
-# 5. 添加流动性
+# 5. 添加流动性：管理员从自己的账户向金库地址转入USDC
 npx ts-node evm-admin.ts add_liquidity 100000000
 npx ts-node svm-admin.ts add_liquidity 100000000
 
-# 6. 测试跨链转账
-npx ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
-npx ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
+# 6. 开启 relayer 服务
+
+# 7. 测试跨链转账
+npx ts-node svm-user.ts balance
+npx ts-node evm-user.ts stake 100 <SVM_RECEIVER_PUBKEY>
+npx ts-node svm-user.ts balance # 确认SVM余额增加
+
+npx ts-node evm-user.ts balance
+npx ts-node svm-user.ts stake 100 <EVM_RECEIVER_ADDRESS>
+npx ts-node evm-user.ts balance # 确认EVM余额增加
 ```
 
 详细说明见 [scripts/README.md](scripts/README.md)
