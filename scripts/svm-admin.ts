@@ -13,22 +13,93 @@
  * 7. withdraw_liquidity - 提取流动性
  */
 
-import { Connection, Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { Program, AnchorProvider, Wallet, BN } from '@coral-xyz/anchor';
-import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction } from '@solana/spl-token';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as fs from 'fs';
 
+// 动态查找最新的 IDL 文件
+function findLatestIdlFile(): string | null {
+  const svmDir = path.resolve(__dirname, '../svm');
+  
+  // 查找所有可能的 IDL 文件路径（优先顺序）
+  const possiblePaths = [
+    path.join(svmDir, 'bridge1024/target/idl/bridge1024.json'),
+    // path.join(svmDir, 'bridge1024/target/deploy/bridge1024.json'),
+  ];
+
+  // 首先尝试直接路径
+  for (const idlPath of possiblePaths) {
+    if (fs.existsSync(idlPath)) {
+      return idlPath;
+    }
+  }
+
+  // 如果直接路径不存在，递归查找 IDL 文件
+  function findIdlRecursive(dir: string): { path: string; mtime: number } | null {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      let latestIdl: { path: string; mtime: number } | null = null;
+
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        
+        // 跳过不需要的目录
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('.') || 
+              entry.name === 'node_modules' || 
+              entry.name === 'target' && dir !== svmDir) {
+            continue;
+          }
+          const found = findIdlRecursive(fullPath);
+          if (found) {
+            if (!latestIdl || found.mtime > latestIdl.mtime) {
+              latestIdl = found;
+            }
+          }
+        } else if (entry.isFile() && entry.name.endsWith('.json')) {
+          // 检查是否是 IDL 文件（包含 version, name, instructions 等字段）
+          try {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const json = JSON.parse(content);
+            if (json.version && json.name && json.instructions) {
+              const stats = fs.statSync(fullPath);
+              if (!latestIdl || stats.mtime.getTime() > latestIdl.mtime) {
+                latestIdl = { path: fullPath, mtime: stats.mtime.getTime() };
+              }
+            }
+          } catch (e) {
+            // 不是有效的 JSON 或 IDL 文件，继续
+          }
+        }
+      }
+
+      return latestIdl;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  const found = findIdlRecursive(svmDir);
+  return found?.path || null;
+}
+
 // 加载 IDL
-const IDL_PATH = path.resolve(__dirname, '../svm/bridge1024/target/idl/bridge1024.json');
 let IDL: any = null;
+let IDL_PATH: string | null = null;
+
 try {
-  if (fs.existsSync(IDL_PATH)) {
+  IDL_PATH = findLatestIdlFile();
+  if (IDL_PATH && fs.existsSync(IDL_PATH)) {
     IDL = JSON.parse(fs.readFileSync(IDL_PATH, 'utf-8'));
+    console.log(`📄 已加载 IDL 文件: ${IDL_PATH}`);
+  } else {
+    console.warn('⚠️  警告: 未找到 IDL 文件');
   }
 } catch (e) {
-  console.warn('Warning: Could not load IDL file');
+  console.warn(`⚠️  警告: 无法加载 IDL 文件: ${e}`);
 }
 
 // 加载环境变量（可选，优先使用 shell 脚本设置的环境变量）
@@ -491,27 +562,47 @@ async function removeRelayer(relayerAddress: string) {
   console.log(`  Relayer to remove: ${relayerAddress}`);
   console.log('');
 
+  if (!IDL) {
+    throw new Error('IDL file not found. Please build SVM contract first: cd svm/bridge1024 && anchor build');
+  }
+
   try {
     const [receiverState] = PublicKey.findProgramAddressSync(
       [Buffer.from('receiver_state')],
       config.programId
     );
 
-    console.log('⚠️  需要 IDL 文件才能执行实际交易');
-    console.log('');
-    console.log('示例调用代码:');
-    console.log(`
-const tx = await program.methods
-  .removeRelayer(new PublicKey("${relayerAddress}"))
-  .accounts({
-    admin: adminKeypair.publicKey,
-    receiverState: receiverState,
-  })
-  .rpc();
-    `);
+    const connection = createConnection(config.rpcUrl);
+    const wallet = new Wallet(adminKeypair);
+    const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
 
-  } catch (error) {
-    printError(`移除 Relayer 失败: ${error}`);
+    const relayerPubkey = new PublicKey(relayerAddress);
+
+    // 构建交易
+    const transaction = await program.methods
+      .removeRelayer(relayerPubkey)
+      .accounts({
+        admin: adminKeypair.publicKey,
+        receiverState: receiverState,
+        systemProgram: SystemProgram.programId,
+      })
+      .transaction();
+
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
+
+    printSuccess(`Relayer ${relayerAddress} 移除成功！`);
+    console.log(`  Transaction: ${txSignature}`);
+
+  } catch (error: any) {
+    printError(`移除 Relayer 失败: ${error.message || error}`);
     throw error;
   }
 }
@@ -561,6 +652,42 @@ async function addLiquidity(amount?: number) {
 
     // 创建连接
     const connection = createConnection(config.rpcUrl);
+
+    // 检查 vault token account 是否存在
+    let vaultTokenAccountExists = false;
+    try {
+      const accountInfo = await connection.getAccountInfo(vaultTokenAccount);
+      if (accountInfo !== null) {
+        vaultTokenAccountExists = true;
+        printSuccess('✓ Vault Token Account 已存在');
+      }
+    } catch (e) {
+      console.log('⚠ Vault Token Account 不存在，需要创建');
+    }
+
+    // 如果不存在，创建它
+    if (!vaultTokenAccountExists) {
+      console.log('正在创建 Vault Token Account...');
+      const createATAInstruction = createAssociatedTokenAccountInstruction(
+        adminKeypair.publicKey, // payer
+        vaultTokenAccount,      // ata
+        vault,                  // owner (vault PDA)
+        config.usdcMint        // mint
+      );
+      
+      const createTx = new Transaction().add(createATAInstruction);
+      const createSig = await sendAndConfirmTransaction(
+        connection,
+        createTx,
+        [adminKeypair],
+        config.rpcUrl
+      );
+      
+      printSuccess('Vault Token Account 创建成功！');
+      console.log(`  Transaction: ${createSig}`);
+      console.log('');
+    }
+
     const wallet = new Wallet(adminKeypair);
     const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
     const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
@@ -608,6 +735,10 @@ async function withdrawLiquidity(amount: number) {
   console.log(`  Amount: ${amount}`);
   console.log('');
 
+  if (!IDL) {
+    throw new Error('IDL file not found. Please build SVM contract first: cd svm/bridge1024 && anchor build');
+  }
+
   try {
     const [vault] = PublicKey.findProgramAddressSync(
       [Buffer.from('vault')],
@@ -630,25 +761,52 @@ async function withdrawLiquidity(amount: number) {
       true
     );
 
-    console.log('⚠️  需要 IDL 文件才能执行实际交易');
+    console.log('账户地址:');
+    console.log(`  Admin Token Account: ${adminTokenAccount.toBase58()}`);
+    console.log(`  Vault Token Account: ${vaultTokenAccount.toBase58()}`);
     console.log('');
-    console.log('示例调用代码:');
-    console.log(`
-const tx = await program.methods
-  .withdrawLiquidity(new BN(${amount}))
-  .accounts({
-    admin: adminKeypair.publicKey,
-    receiverState: receiverState,
-    vault: vault,
-    adminTokenAccount: adminTokenAccount,
-    vaultTokenAccount: vaultTokenAccount,
-    tokenProgram: TOKEN_PROGRAM_ID,
-  })
-  .rpc();
-    `);
 
-  } catch (error) {
-    printError(`提取流动性失败: ${error}`);
+    // 创建连接
+    const connection = createConnection(config.rpcUrl);
+
+    // 检查 vault token account 是否存在
+    const accountInfo = await connection.getAccountInfo(vaultTokenAccount);
+    if (accountInfo === null) {
+      throw new Error('Vault Token Account 不存在。请先运行 add_liquidity 命令创建账户并添加流动性。');
+    }
+
+    const wallet = new Wallet(adminKeypair);
+    const provider = new AnchorProvider(connection, wallet, { commitment: 'confirmed' });
+    const idlWithCorrectAddress = { ...IDL, address: config.programId.toBase58() };
+    const program = new Program(idlWithCorrectAddress, provider);
+
+    // 构建交易
+    const transaction = await program.methods
+      .withdrawLiquidity(new BN(amount))
+      .accounts({
+        admin: adminKeypair.publicKey,
+        receiverState: receiverState,
+        vault: vault,
+        usdcMint: config.usdcMint,
+        adminTokenAccount: adminTokenAccount,
+        vaultTokenAccount: vaultTokenAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .transaction();
+
+    // 发送交易并等待确认（5秒超时）
+    const txSignature = await sendAndConfirmTransaction(
+      connection,
+      transaction,
+      [adminKeypair],
+      config.rpcUrl
+    );
+
+    printSuccess('流动性提取成功！');
+    console.log(`  Transaction: ${txSignature}`);
+
+  } catch (error: any) {
+    printError(`提取流动性失败: ${error.message || error}`);
     throw error;
   }
 }

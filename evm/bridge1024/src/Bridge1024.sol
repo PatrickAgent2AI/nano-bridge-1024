@@ -187,15 +187,16 @@ contract Bridge1024 {
         uint64 sourceChainId,
         uint64 targetChainId
     ) external onlyAdmin {
-        // Configure sender state
+        // Configure sender state (for EVM → peer transfers)
         senderState.targetContract = peerContract;
-        senderState.sourceChainId = sourceChainId;
-        senderState.targetChainId = targetChainId;
+        senderState.sourceChainId = sourceChainId;  // EVM chain ID
+        senderState.targetChainId = targetChainId;  // Peer chain ID
         
-        // Configure receiver state
+        // Configure receiver state (for peer → EVM transfers)
+        // Note: Chain IDs are swapped for receiver since it receives from peer
         receiverStateInternal.sourceContract = peerContract;
-        receiverStateInternal.sourceChainId = sourceChainId;
-        receiverStateInternal.targetChainId = targetChainId;
+        receiverStateInternal.sourceChainId = targetChainId;  // Peer chain ID (source of incoming events)
+        receiverStateInternal.targetChainId = sourceChainId;  // EVM chain ID (target of incoming events)
     }
     
     // ============ Sender Functions ============

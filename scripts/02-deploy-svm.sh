@@ -283,16 +283,16 @@ export SVM_PROGRAM_ID="$PROGRAM_ID"
 export ADMIN_SVM_KEYPAIR_PATH="$ADMIN_KEYPAIR"
 
 # 调用 initialize - 显示实时输出
-if ./node_modules/.bin/ts-node svm-admin.ts initialize; then
+if timeout 5 ./node_modules/.bin/ts-node svm-admin.ts initialize; then
     echo ""
     echo -e "${GREEN}✓ 合约初始化成功${NC}"
 else
     INIT_EXIT=$?
     echo ""
     echo -e "${RED}错误: 合约初始化失败（退出码: $INIT_EXIT）${NC}"
-    echo -e "${YELLOW}提示: 如果错误是账户已存在 (0x0)，可能是合约已经初始化过了${NC}"
+    echo -e "${YELLOW}提示: 如果错误是账户已存在 (0x0)，可能是合约已经初始化过了，也可能是ws接口超时 ${NC}"
     echo -e "${YELLOW}      你可以继续下一步，或者使用选项2生成新的程序ID重新部署${NC}"
-    exit 1
+    # exit 1
 fi
 
 echo ""
@@ -310,10 +310,10 @@ echo "更新配置文件..."
 if [ -f "$SVM_CONFIG_FILE" ] && grep -q "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE"; then
     CONFIG_PROGRAM_ID=$(grep "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE" | cut -d'=' -f2)
     if [ -n "$CONFIG_PROGRAM_ID" ] && [ "$CONFIG_PROGRAM_ID" != "$PROGRAM_ID" ]; then
-        echo -e "${YELLOW}⚠ 检测到配置文件中的 Program ID 与 keypair 不一致${NC}"
-        echo "  配置文件: $CONFIG_PROGRAM_ID"
-        echo "  Keypair:  $PROGRAM_ID"
-        echo -e "${YELLOW}  将使用 keypair 中的 Program ID 更新所有配置...${NC}"
+        echo -e "${YELLOW}ℹ 检测到配置文件中的 Program ID 与新的 keypair 不一致（这是正常的，如果选择了生成新程序ID）${NC}"
+        echo "  旧配置: $CONFIG_PROGRAM_ID"
+        echo "  新程序ID: $PROGRAM_ID"
+        echo -e "${GREEN}  正在自动更新配置文件...${NC}"
     fi
     sed -i "s|^SVM_PROGRAM_ID=.*|SVM_PROGRAM_ID=${PROGRAM_ID}|g" "$SVM_CONFIG_FILE"
 else
@@ -392,7 +392,7 @@ echo "验证 Program ID 一致性..."
 KEYPAIR_ID=$(solana address -k "$KEYPAIR_PATH" 2>/dev/null || echo "N/A")
 CONFIG_ID=$(grep "^SVM_PROGRAM_ID=" "$SVM_CONFIG_FILE" 2>/dev/null | cut -d'=' -f2 || echo "N/A")
 DECLARED_ID=$(grep -oP 'declare_id!\("\K[^"]+' "$LIB_RS_PATH" 2>/dev/null || echo "N/A")
-IDL_ID=$(grep '"address"' "$CONTRACT_DIR/target/idl/bridge1024.json" 2>/dev/null | head -1 | grep -oP '"\K[A-Za-z0-9]+' || echo "N/A")
+IDL_ID=$(grep -oP '"address"\s*:\s*"\K[^"]+' "$CONTRACT_DIR/target/idl/bridge1024.json" 2>/dev/null | head -1 || echo "N/A")
 
 # 检查一致性
 CONSISTENCY_OK=true

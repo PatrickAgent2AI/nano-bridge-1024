@@ -228,11 +228,13 @@ echo -e "${BLUE}步骤 2/4: 配置 EVM 对端合约地址${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 
+PEER_CONTRACT_ADDRESS_FOR_EVM=$SVM_PROGRAM_ID
+
 if ! EVM_RPC_URL="$EVM_RPC_URL" \
      EVM_CONTRACT_ADDRESS="$EVM_CONTRACT_ADDRESS" \
      ADMIN_EVM_PRIVATE_KEY="$ADMIN_EVM_PRIVATE_KEY" \
      USDC_EVM_CONTRACT="$USDC_EVM_CONTRACT" \
-     PEER_CONTRACT_ADDRESS_FOR_EVM="$SVM_PROGRAM_ID" \
+     PEER_CONTRACT_ADDRESS_FOR_EVM="$PEER_CONTRACT_ADDRESS_FOR_EVM" \
      EVM_CHAIN_ID="$EVM_CHAIN_ID" \
      SVM_CHAIN_ID="$SVM_CHAIN_ID" \
      ./node_modules/.bin/ts-node evm-admin.ts configure_peer; then
@@ -273,11 +275,13 @@ echo -e "${BLUE}步骤 4/4: 配置 SVM 对端合约地址${NC}"
 echo -e "${BLUE}============================================${NC}"
 echo ""
 
+PEER_CONTRACT_ADDRESS_FOR_SVM=$EVM_CONTRACT_ADDRESS
+
 if ! SVM_RPC_URL="$SVM_RPC_URL" \
      SVM_PROGRAM_ID="$SVM_PROGRAM_ID" \
      ADMIN_SVM_PRIVATE_KEY="$ADMIN_SVM_PRIVATE_KEY" \
      USDC_SVM_MINT="$USDC_SVM_MINT" \
-     PEER_CONTRACT_ADDRESS_FOR_SVM="$EVM_CONTRACT_ADDRESS" \
+     PEER_CONTRACT_ADDRESS_FOR_SVM="$PEER_CONTRACT_ADDRESS_FOR_SVM" \
      EVM_CHAIN_ID="$EVM_CHAIN_ID" \
      SVM_CHAIN_ID="$SVM_CHAIN_ID" \
      timeout 5s ./node_modules/.bin/ts-node svm-admin.ts configure_peer; then
