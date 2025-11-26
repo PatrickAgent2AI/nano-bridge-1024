@@ -9,7 +9,7 @@ use ethers::{
 };
 use shared::types::StakeEventData;
 use std::{path::Path, sync::Arc};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // StakeEvent ABI 定义
 #[derive(Debug, Clone, EthEvent)]
@@ -106,7 +106,7 @@ async fn listen_for_events(
     // 查询事件（限制查询范围以避免超时）
     let to_block = std::cmp::min(from_block + 1000, latest_block);
 
-    info!(
+    debug!(
         from = from_block,
         to = to_block,
         "Querying events from block range"
@@ -126,7 +126,7 @@ async fn listen_for_events(
         .await
         .map_err(|e| anyhow!("Failed to get logs: {}", e))?;
 
-    info!(count = logs.len(), "Found events");
+    debug!(count = logs.len(), "Found events");
 
     // 处理每个日志
     for log in logs {

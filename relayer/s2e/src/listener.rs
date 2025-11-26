@@ -6,7 +6,7 @@ use shared::types::StakeEventData;
 use std::time::Duration;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use borsh::BorshDeserialize;
 use serde::Deserialize;
 use serde_json::json;
@@ -94,7 +94,7 @@ async fn listen_for_events(
 ) -> Result<()> {
     let program_id = &config.source_chain.contract_address;
     
-    info!("Polling for SVM events from program: {}", program_id);
+    debug!("Polling for SVM events from program: {}", program_id);
 
     // 创建 HTTP 客户端
     let client = reqwest::Client::new();
@@ -121,7 +121,7 @@ async fn listen_for_events(
 
     let signatures: RpcResponse<Vec<SignatureInfo>> = response.json().await?;
 
-    info!("Found {} recent transactions", signatures.result.len());
+    debug!("Found {} recent transactions", signatures.result.len());
 
     // 处理每个交易
     for sig_info in signatures.result.iter() {
