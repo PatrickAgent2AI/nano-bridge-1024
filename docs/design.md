@@ -397,22 +397,82 @@ pub struct ReceiverState {
    - 如果 nonce <= last_nonce，拒绝（重放攻击）
    - 如果 nonce > last_nonce，继续处理
 5. 获取或创建 CrossChainRequest PDA 账户
-6. 检查该 relayer 是否已为此 nonce 签名
-7. **验证Ed25519签名**（真实密码学验证）：
+6. **初始化或验证 event_data 一致性**：
+   - 如果这是第一个签名（signatureCount == 0）：
+     * 将传入的 event_data 存储为"标准答案"
+     * 这是后续所有 relayer 必须遵循的 event_data
+   - 如果不是第一个签名（signatureCount > 0）：
+     * **关键安全机制**：验证传入的 event_data 是否与已存储的 event_data 完全一致
+     * 检查所有字段：sourceContract, targetContract, sourceChainId, targetChainId, 
+                     blockHeight, amount, receiverAddress, nonce
+     * 如果任何字段不匹配，拒绝并返回错误 "Invalid event data"
+     * 这防止恶意 relayer 提交不同的 event_data 导致数据不一致
+7. 检查该 relayer 是否已为此 nonce 签名
+8. **验证Ed25519签名**（真实密码学验证）：
    - 从Instructions Sysvar加载当前指令之前的所有指令
    - 查找Ed25519Program指令（程序ID: Ed25519SigVerify111111111111111111111111111）
    - 验证Ed25519Program指令中的签名、公钥、消息与我们的参数匹配
+   - 验证签名是否匹配传入的 event_data
    - 如果找到匹配的Ed25519Program指令，说明签名已被密码学验证
    - 如果没有找到或不匹配，拒绝签名
-8. 记录签名到 CrossChainRequest.signed_relayers
-9. 计算签名数量，检查是否达到阈值（> 2/3 relayer_count）
-10. 如果达到阈值：
+9. 记录签名到 CrossChainRequest.signed_relayers
+10. 计算签名数量，检查是否达到阈值（> 2/3 relayer_count）
+11. 如果达到阈值：
    - 从 PDA 金库转账到接收地址（使用配置的 usdc_mint）
+   - **重要**：使用存储的 event_data（第一个 relayer 提交的）而不是函数参数
    - 使用 PDA 作为 authority，无需外部签名
-   - 更新 last_nonce = nonce（标记为已使用）
+   - 更新 last_nonce = 存储的 event_data.nonce（标记为已使用）
    - 标记 CrossChainRequest.is_unlocked = true
    - 可选：关闭 CrossChainRequest 账户回收租金
 ```
+
+#### Event Data 一致性验证机制
+
+**设计原则：以第一个提交的 event_data 为准**
+
+系统采用"第一个提交者决定"的设计原则：
+- 第一个 relayer 提交的 `event_data` 会被存储并成为"标准答案"
+- 后续所有 relayer 必须提交完全相同的 `event_data` 才能通过验证
+- 解锁时使用存储的 `event_data`，确保一致性
+
+**安全性分析：**
+
+1. **防止恶意 relayer 提交错误数据**：
+   - 如果第一个 relayer 提交错误的 `event_data`（如错误的 amount 或 receiver）
+   - 正常 relayer 无法提交不同的 `event_data`（会被一致性检查拒绝）
+   - 正常 relayer 也无法提交相同的错误 `event_data`（因为他们的签名是对正确数据的签名，签名验证会失败）
+   - 结果：无法达到阈值，流程会卡住，不会执行错误的解锁
+
+2. **正常情况下的工作流程**：
+   - 所有正常 relayer 监听链上事件，获取相同的正确 `event_data`
+   - 第一个 relayer 提交正确的 `event_data` 并存储
+   - 后续 relayer 提交相同的正确 `event_data`，通过一致性检查
+   - 每个 relayer 的签名都匹配他们提交的 `event_data`，通过签名验证
+   - 达到阈值后，使用存储的正确 `event_data` 解锁
+
+3. **安全性保证**：
+   - ✅ 需要 >2/3 的 relayer 签名才能解锁
+   - ✅ 所有 relayer 必须对相同的 `event_data` 签名
+   - ✅ 签名验证确保每个 relayer 的签名匹配其提交的 `event_data`
+   - ✅ 一致性检查确保所有 relayer 提交相同的 `event_data`
+   - ✅ 即使第一个 relayer 是恶意的，正常 relayer 无法通过签名验证来确认错误的 `event_data`
+
+**潜在攻击场景与防护：**
+
+- **场景1**：第一个 relayer 提交错误的 `event_data`
+  - 正常 relayer 无法提交不同的数据（一致性检查拒绝）
+  - 正常 relayer 无法提交相同的错误数据（签名验证失败）
+  - **结果**：无法达到阈值，系统安全
+
+- **场景2**：多个 relayer（< 阈值）被劫持并提交错误的 `event_data`
+  - 如果第一个 relayer 正常，后续恶意 relayer 无法提交不同的数据
+  - 如果第一个 relayer 恶意但数量不足，正常 relayer 无法通过签名验证
+  - **结果**：无法达到阈值，系统安全
+
+- **场景3**：超过 2/3 的 relayer 被同时劫持
+  - 这是系统威胁模型假设的攻击场景
+  - 如果超过 2/3 的 relayer 被劫持，系统无法防止恶意行为
+  - 这是所有多重签名系统的固有风险
 
 #### Ed25519签名验证详解
 
@@ -751,6 +811,48 @@ await program.methods
 - 使用 PDA 确保账户所有权
 - 解锁后可以关闭 CrossChainRequest 账户回收租金
 - Nonce 递增判断确保不会重放已处理的请求
+
+### Event Data 一致性验证机制（关键安全修复）
+
+**问题背景：**
+在修复前，系统存在一个潜在的漏洞：如果第一个 relayer 提交错误的 `event_data`（例如错误的 amount 或 receiver），后续 relayer 可能会提交不同的 `event_data`，导致跨链请求参数不一致，最终可能按照错误的数据解锁代币。
+
+**修复方案：**
+系统实现了严格的 event_data 一致性验证机制，采用"第一个提交者决定"的设计原则：
+
+1. **第一个 relayer 提交时**：
+   - 将传入的 `event_data` 存储为本次跨链请求的"标准答案"
+   - 所有字段（sourceContract, targetContract, sourceChainId, targetChainId, blockHeight, amount, receiverAddress, nonce）被永久固定
+
+2. **后续 relayer 提交时**：
+   - **强制一致性检查**：验证传入的 `event_data` 是否与已存储的 `event_data` 完全一致
+   - 如果任何字段不匹配，直接拒绝并返回错误 "Invalid event data"
+   - 这确保所有 relayer 必须对相同的事件数据签名
+
+3. **解锁时**：
+   - 使用存储的 `event_data`（第一个 relayer 提交的），而不是函数参数的 `event_data`
+   - 这确保即使后续 relayer 传入的参数被修改，解锁操作仍使用最初存储的正确数据
+
+**安全性保证：**
+
+- ✅ **防止数据不一致**：所有 relayer 必须提交完全相同的 `event_data`
+- ✅ **防止参数篡改**：即使恶意 relayer 尝试提交不同的参数，也会被一致性检查拒绝
+- ✅ **签名验证双重保护**：签名验证确保每个 relayer 的签名匹配其提交的 `event_data`，一致性检查确保所有 relayer 提交相同的 `event_data`
+- ✅ **第一个 relayer 保护**：如果第一个 relayer 恶意提交错误数据，正常 relayer 无法通过签名验证（他们的签名是对正确数据的签名），导致无法达到阈值
+
+**攻击场景分析：**
+
+| 攻击场景 | 防御机制 | 结果 |
+|---------|---------|------|
+| 第一个 relayer 提交错误的 `event_data` | 正常 relayer 的签名验证会失败（签名是对正确数据的签名） | ❌ 无法达到阈值，流程卡住，不会执行错误的解锁 |
+| 后续 relayer 提交不同的 `event_data` | 一致性检查拒绝（与存储的数据不匹配） | ❌ 交易被拒绝 |
+| 部分 relayer 被劫持（< 2/3） | 阈值机制（需要 > 2/3 签名）+ 签名验证 | ❌ 无法达到阈值 |
+| 超过 2/3 的 relayer 被同时劫持 | 这是系统威胁模型假设的攻击场景 | ⚠️ 所有多重签名系统的固有风险 |
+
+**实现位置：**
+- **SVM 合约**：`submit_signature` 函数中的 `else` 分支（第 219-232 行）
+- **EVM 合约**：`submitSignature` 函数中的 `else` 分支（第 312-327 行）
+- **错误代码**：`InvalidEventData` (SVM) 和 `InvalidEventData()` (EVM)
 
 ---
 

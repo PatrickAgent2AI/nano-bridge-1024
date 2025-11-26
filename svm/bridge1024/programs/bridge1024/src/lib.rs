@@ -216,6 +216,20 @@ pub mod bridge1024 {
             cross_chain_request.signature_count = 0;
             cross_chain_request.is_unlocked = false;
             cross_chain_request.event_data = event_data.clone();
+        } else {
+            // Verify that the submitted event_data matches the stored event_data
+            // This prevents a malicious relayer from submitting different event_data
+            require!(
+                cross_chain_request.event_data.source_contract == event_data.source_contract &&
+                cross_chain_request.event_data.target_contract == event_data.target_contract &&
+                cross_chain_request.event_data.source_chain_id == event_data.source_chain_id &&
+                cross_chain_request.event_data.target_chain_id == event_data.target_chain_id &&
+                cross_chain_request.event_data.block_height == event_data.block_height &&
+                cross_chain_request.event_data.amount == event_data.amount &&
+                cross_chain_request.event_data.receiver_address == event_data.receiver_address &&
+                cross_chain_request.event_data.nonce == event_data.nonce,
+                ErrorCode::InvalidEventData
+            );
         }
 
         // Check if this relayer has already signed
@@ -225,6 +239,9 @@ pub mod bridge1024 {
         );
 
         // Verify Ed25519 signature using Ed25519Program
+        // Note: Signature is verified against the submitted event_data
+        // This ensures each relayer's signature matches their submitted event_data
+        // The consistency check above ensures all relayers submit the same event_data
         let relayer_pubkey = ctx.accounts.relayer.key();
         verify_ed25519_signature(
             &ctx.accounts.instructions_sysvar,
@@ -246,8 +263,9 @@ pub mod bridge1024 {
             cross_chain_request.is_unlocked = true;
 
             // Update last_nonce
+            // Use the stored event_data.nonce instead of function parameter
             let receiver_state = &mut ctx.accounts.receiver_state;
-            receiver_state.last_nonce = event_data.nonce;
+            receiver_state.last_nonce = cross_chain_request.event_data.nonce;
 
             // Unlock tokens: transfer from vault to receiver
             // Find vault bump
@@ -264,7 +282,8 @@ pub mod bridge1024 {
             };
             let cpi_program = ctx.accounts.token_program.to_account_info();
             let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds);
-            token::transfer(cpi_ctx, event_data.amount)?;
+            // Use the stored event_data instead of function parameter to prevent inconsistencies
+            token::transfer(cpi_ctx, cross_chain_request.event_data.amount)?;
         }
 
         Ok(())
@@ -770,6 +789,8 @@ pub enum ErrorCode {
     TooManyRelayers,
     #[msg("Relayer already signed")]
     RelayerAlreadySigned,
+    #[msg("Invalid event data: event data must match the first submitted event data")]
+    InvalidEventData,
 }
 
 #[event]

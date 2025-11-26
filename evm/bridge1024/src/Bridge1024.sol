@@ -117,6 +117,7 @@ contract Bridge1024 {
     error TooManyRelayers();
     error RelayerAlreadySigned();
     error AlreadyInitialized();
+    error InvalidEventData();
     
     // ============ Modifiers ============
     
@@ -308,6 +309,21 @@ contract Bridge1024 {
         if (nonceSignature.signatureCount == 0) {
             nonceSignature.eventData = eventData;
             nonceSignature.isUnlocked = false;
+        } else {
+            // Verify that the submitted eventData matches the stored eventData
+            // This prevents a malicious relayer from submitting different eventData
+            if (
+                nonceSignature.eventData.sourceContract != eventData.sourceContract ||
+                nonceSignature.eventData.targetContract != eventData.targetContract ||
+                nonceSignature.eventData.sourceChainId != eventData.sourceChainId ||
+                nonceSignature.eventData.targetChainId != eventData.targetChainId ||
+                nonceSignature.eventData.blockHeight != eventData.blockHeight ||
+                nonceSignature.eventData.amount != eventData.amount ||
+                keccak256(bytes(nonceSignature.eventData.receiverAddress)) != keccak256(bytes(eventData.receiverAddress)) ||
+                nonceSignature.eventData.nonce != eventData.nonce
+            ) {
+                revert InvalidEventData();
+            }
         }
         
         // Check if relayer already signed
@@ -328,14 +344,16 @@ contract Bridge1024 {
         // Check if threshold is reached
         if (nonceSignature.signatureCount >= threshold && !nonceSignature.isUnlocked) {
             nonceSignature.isUnlocked = true;
-            receiverStateInternal.lastNonce = eventData.nonce;
+            // Use the stored eventData.nonce instead of function parameter
+            receiverStateInternal.lastNonce = nonceSignature.eventData.nonce;
             
             // Unlock tokens: transfer from contract (vault) to receiver
+            // Use the stored eventData instead of function parameter to prevent inconsistencies
             IERC20 usdc = IERC20(receiverStateInternal.usdcContract);
-            address receiver = _parseAddress(eventData.receiverAddress);
-            require(usdc.transfer(receiver, eventData.amount), "Transfer failed");
+            address receiver = _parseAddress(nonceSignature.eventData.receiverAddress);
+            require(usdc.transfer(receiver, nonceSignature.eventData.amount), "Transfer failed");
             
-            emit TokensUnlocked(eventData.nonce, receiver, eventData.amount);
+            emit TokensUnlocked(nonceSignature.eventData.nonce, receiver, nonceSignature.eventData.amount);
         }
     }
     

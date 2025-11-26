@@ -381,19 +381,44 @@ struct StakeEventData {
 2. **验证USDC地址已配置**：如果 `usdc_mint` 未配置（为无效地址），返回错误 "USDC address not configured"
 3. **验证源链合约地址正确**（与配置的 sourceContract 匹配）
 4. **验证 chain id 正确**（与配置的 sourceChainId 匹配）
-5. 验证签名的合法性
-6. **检查 nonce 是否递增**：
+5. **检查 nonce 是否递增**：
    - 如果 `nonce <= last_nonce`，拒绝（重放攻击）
    - 如果 `nonce > last_nonce`，继续处理
-7. 获取或创建 `CrossChainRequest` PDA 账户（为每个请求创建独立账户）
+6. 获取或创建 `CrossChainRequest` PDA 账户（为每个请求创建独立账户）
+7. **初始化或验证 event_data 一致性**（关键安全机制）：
+   - **如果是第一个签名**（signatureCount == 0）：
+     * 将传入的 `eventData` 存储为"标准答案"
+     * 第一个 relayer 提交的 `eventData` 将决定本次跨链请求的所有参数
+   - **如果不是第一个签名**（signatureCount > 0）：
+     * 验证传入的 `eventData` 是否与已存储的 `eventData` 完全一致
+     * 检查所有字段：sourceContract, targetContract, sourceChainId, targetChainId, 
+                     blockHeight, amount, receiverAddress, nonce
+     * 如果任何字段不匹配，拒绝并返回错误 "Invalid event data: event data must match the first submitted event data"
+     * **目的**：防止恶意 relayer 提交不同的 eventData，确保所有 relayer 对相同的事件数据签名
 8. 检查该 relayer 是否已为此 nonce 签名
-9. 记录该 relayer 的签名到 `CrossChainRequest.signed_relayers`
-10. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
-11. 解锁操作：从金库向接收地址转账等量 USDC（使用配置的 `usdc_mint` 地址）
-12. 更新 `last_nonce = nonce`（标记为已使用），防止重放
+9. **验证签名的合法性**：
+   - 验证签名是否匹配传入的 `eventData`
+   - SVM 端使用 Ed25519Program 进行密码学验证
+   - EVM 端使用 ecrecover 进行 ECDSA 验证
+10. 记录该 relayer 的签名到 `CrossChainRequest.signed_relayers`
+11. 如果合法签名数量达到阈值（> 2/3 白名单大小），则执行解锁操作
+12. **解锁操作**：
+    - 从金库向接收地址转账等量 USDC（使用配置的 `usdc_mint` 地址）
+    - **重要**：使用存储的 `eventData`（第一个 relayer 提交的），而不是函数参数的 `eventData`
+    - 这确保即使函数参数被修改，解锁操作仍使用最初存储的正确数据
+13. 更新 `last_nonce = 存储的 eventData.nonce`（标记为已使用），防止重放
+
+**安全性说明：**
+
+系统采用"第一个提交者决定"的设计原则：
+- 第一个 relayer 提交的 `eventData` 成为本次跨链请求的"标准答案"
+- 后续所有 relayer 必须提交完全相同的 `eventData` 才能通过验证
+- 这防止了恶意 relayer 通过提交不同的 `eventData` 来操纵解锁参数（如 amount 或 receiver）
+- 解锁时始终使用存储的 `eventData`，确保参数一致性
 
 **错误情况：**
 - `USDC address not configured`：USDC地址未配置，需要先调用 `configure_usdc` 函数
+- `Invalid event data: event data must match the first submitted event data`：后续 relayer 提交的 eventData 与第一个 relayer 提交的不一致，拒绝签名
 
 #### 流动性管理
 

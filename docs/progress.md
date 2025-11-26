@@ -573,7 +573,18 @@
 
 ### 已解决问题
 
-1. **测试套件 ECDSA 签名生成错误**（2025-11-14）
+1. **Event Data 一致性验证漏洞修复**（2025-11-24）
+   - 问题：恶意 relayer 可以提交错误的 `event_data`，导致跨链请求参数不一致，可能按照错误的数据解锁代币
+   - 解决：
+     * 实现严格的 event_data 一致性验证机制
+     * 第一个 relayer 提交的 `event_data` 成为"标准答案"
+     * 后续 relayer 必须提交完全相同的 `event_data` 才能通过验证
+     * 解锁时使用存储的 `event_data` 而不是函数参数
+     * 在 SVM 和 EVM 两个合约中都添加了验证逻辑
+   - 状态：✅ 已解决
+   - 相关文档：`docs/design.md` 和 `docs/api.md` 已更新
+
+2. **测试套件 ECDSA 签名生成错误**（2025-11-14）
    - 问题：`crypto.createECDH` 生成的密钥格式与 `crypto.createSign` 不兼容
    - 解决：使用 `crypto.generateKeyPairSync` 生成 PEM 格式密钥对
    - 状态：✅ 已解决
