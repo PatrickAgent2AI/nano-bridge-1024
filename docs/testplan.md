@@ -572,18 +572,18 @@ relayer/
 - 准备好金库地址和管理员地址
 
 **测试步骤：**
-1. 调用 `initialize(vaultAddress, adminAddress)` 方法
+1. 调用 `initialize(adminAddress)` 方法
 2. 验证初始化结果
 
 **预期结果：**
 - 发送端和接收端合约同时初始化成功
-- 金库地址、管理员地址被正确设置（发送端和接收端共享）
+- 金库地址自动设置为合约本身 `address(this)`（发送端和接收端共享）
+- 管理员地址被正确设置（发送端和接收端共享）
 - 发送端初始 nonce 为 0
 - 接收端初始 last_nonce 为 0
 - 接收端 relayer_count 为 0
 
 **测试数据：**
-- vaultAddress: 有效的钱包地址
 - adminAddress: 有效的钱包地址
 
 #### TC-002: 配置USDC代币地址
@@ -1467,7 +1467,7 @@ interface StakeEventData {
 6. （可选）调用 `addLiquidity(amount)` 向 PDA 金库增加流动性
 
 **EVM 平台：**
-1. 调用 `initialize(vaultAddress, adminAddress)` 初始化发送端和接收端合约
+1. 调用 `initialize(adminAddress)` 初始化发送端和接收端合约
 2. 调用 `configure_usdc(usdcAddress)` 配置USDC ERC20合约地址
 3. 调用 `configure_peer(peerContract, sourceChainId, targetChainId)` 统一配置对端合约和链ID
 
@@ -1749,7 +1749,7 @@ event StakeEvent(
 ### 统一初始化流程
 
 **EVM 平台：**
-1. 调用 `initialize(vaultAddress, adminAddress)` 初始化发送端和接收端合约
+1. 调用 `initialize(adminAddress)` 初始化发送端和接收端合约
 2. 调用 `configure_usdc(usdcAddress)` 配置USDC ERC20合约地址（必须在stake和submit_signature之前配置）
 3. 调用 `configure_peer(peerContract, sourceChainId, targetChainId)` 统一配置对端合约和链ID
 

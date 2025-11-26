@@ -141,10 +141,9 @@ contract Bridge1024 {
     
     /**
      * @notice Initialize both sender and receiver contracts
-     * @param vaultAddress Vault address (deprecated, contract itself acts as vault)
      * @param adminAddress Admin address for management operations
      */
-    function initialize(address vaultAddress, address adminAddress) external {
+    function initialize(address adminAddress) external {
         if (senderState.admin != address(0)) revert AlreadyInitialized();
         
         // Initialize sender state - contract itself acts as vault

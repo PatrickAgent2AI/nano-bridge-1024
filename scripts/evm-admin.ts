@@ -25,7 +25,7 @@ dotenv.config({ path: path.resolve(__dirname, '../.env.invoke') });
 
 const BRIDGE_ABI = [
   // Admin functions
-  'function initialize(address vaultAddress, address adminAddress) external',
+  'function initialize(address adminAddress) external',
   'function configureUsdc(address usdcAddress) external',
   'function configurePeer(bytes32 peerContract, uint64 sourceChainId, uint64 targetChainId) external',
   'function addRelayer(address relayerAddress) external',
@@ -49,7 +49,6 @@ interface Config {
   rpcUrl: string;
   contractAddress: string;
   adminPrivateKey: string;
-  vaultAddress: string;
   usdcContract: string;
   peerContract: string;
   sourceChainId: number;
@@ -66,7 +65,6 @@ function loadConfig(): Config {
     rpcUrl: process.env.EVM_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc',
     contractAddress: process.env.EVM_CONTRACT_ADDRESS || '',
     adminPrivateKey: process.env.ADMIN_EVM_PRIVATE_KEY || '',
-    vaultAddress: process.env.EVM_VAULT_ADDRESS || '',
     usdcContract: process.env.USDC_EVM_CONTRACT || '',
     peerContract: process.env.PEER_CONTRACT_ADDRESS_FOR_EVM || '',
     sourceChainId: parseInt(process.env.EVM_CHAIN_ID || '421614'),
@@ -116,12 +114,11 @@ async function initialize() {
   console.log('配置信息:');
   console.log(`  Contract: ${config.contractAddress}`);
   console.log(`  Admin: ${wallet.address}`);
-  console.log(`  Vault: ${config.vaultAddress}`);
   console.log('');
 
   try {
     console.log('执行初始化...');
-    const tx = await bridge.initialize(config.vaultAddress, wallet.address);
+    const tx = await bridge.initialize(wallet.address);
     await waitForTx(tx, '初始化成功！');
     
     console.log(`Explorer: https://sepolia.arbiscan.io/tx/${tx.hash}`);

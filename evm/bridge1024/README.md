@@ -33,8 +33,8 @@
 
 ### 统一合约
 
-- `initialize(vaultAddress, adminAddress)` - 统一初始化发送端和接收端
-  - **注意**：从 v2.0 开始，`vaultAddress` 参数已废弃，合约本身作为金库
+- `initialize(adminAddress)` - 统一初始化发送端和接收端
+  - **注意**：合约本身作为金库，不需要单独的 vault 地址
   - 合约内部使用 `address(this)` 作为金库地址
 - `configureUsdc(usdcAddress)` - 配置 USDC ERC20 合约地址
 - `configurePeer(peerContract, sourceChainId, targetChainId)` - 配置对端合约和链ID
@@ -184,10 +184,9 @@ forge create \
   --private-key $ADMIN_EVM_PRIVATE_KEY \
   src/Bridge1024.sol:Bridge1024
 
-# 初始化（注意：vaultAddress 参数已废弃，可传入任意地址）
+# 初始化
 cast send <CONTRACT_ADDRESS> \
-  "initialize(address,address)" \
-  $EVM_ADMIN_ADDRESS \
+  "initialize(address)" \
   $EVM_ADMIN_ADDRESS \
   --rpc-url https://sepolia-rollup.arbitrum.io/rpc \
   --private-key $ADMIN_EVM_PRIVATE_KEY

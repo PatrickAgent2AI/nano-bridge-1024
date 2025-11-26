@@ -20,7 +20,6 @@
 **需要的环境变量：**
 - `EVM_RPC_URL`: EVM RPC 地址
 - `ADMIN_EVM_PRIVATE_KEY`: 管理员私钥
-- `EVM_VAULT_ADDRESS`: 金库地址（可选，默认使用管理员地址）
 - `EVM_ADMIN_ADDRESS`: 管理员地址（可选，默认使用私钥对应地址）
 
 **输出：**
@@ -325,8 +324,9 @@ npx ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
 - `EVM_RPC_URL` - EVM RPC 地址
 - `EVM_ADMIN_ADDRESS` - 管理员地址
 - `ADMIN_EVM_PRIVATE_KEY` - 管理员私钥
-- `EVM_VAULT_ADDRESS` - 金库地址
 - `EVM_CONTRACT_ADDRESS` ← 部署后自动写入
+  
+**注意：** 从 v2.0 开始，合约本身作为金库（vault），不需要单独配置金库地址。
 
 ### `.env.svm.deploy` (步骤 2 生成 - 自动)
 由 `02-deploy-svm.sh` 自动创建和更新：

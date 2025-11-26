@@ -215,7 +215,7 @@ contract Bridge1024Test is Test {
     
     function testTC001_UnifiedInitialize() public {
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Verify sender state - vault is now contract itself
         (address sVault, address sAdmin, address sUsdc, uint64 sNonce, 
@@ -243,7 +243,7 @@ contract Bridge1024Test is Test {
     
     function testTC002_ConfigureUsdc() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         vm.stopPrank();
         
@@ -257,7 +257,7 @@ contract Bridge1024Test is Test {
     
     function testTC003_ConfigurePeer_Sender() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
         
@@ -270,20 +270,21 @@ contract Bridge1024Test is Test {
     
     function testTC003_ConfigurePeer_Receiver() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
         
         // Verify receiver configuration
+        // Note: Chain IDs are swapped for receiver (receives from peer)
         (, , , , bytes32 rSource, uint64 rSourceChain, uint64 rTargetChain, ) = bridge.receiverState();
         assertEq(rSource, peerContract);
-        assertEq(rSourceChain, SOURCE_CHAIN_ID);
-        assertEq(rTargetChain, TARGET_CHAIN_ID);
+        assertEq(rSourceChain, TARGET_CHAIN_ID);  // Source is peer chain
+        assertEq(rTargetChain, SOURCE_CHAIN_ID);  // Target is current chain
     }
     
     function testTC003B_ConfigurePeer_NonAdmin() public {
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Non-admin tries to configure peer
         vm.prank(nonAdmin);
@@ -296,7 +297,7 @@ contract Bridge1024Test is Test {
     function testTC004_Stake_Success() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
@@ -333,7 +334,7 @@ contract Bridge1024Test is Test {
     function testTC005_Stake_InsufficientBalance() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
@@ -351,7 +352,7 @@ contract Bridge1024Test is Test {
     function testTC006_Stake_NotApproved() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
@@ -365,7 +366,7 @@ contract Bridge1024Test is Test {
     function testTC007_Stake_UsdcNotConfigured() public {
         // Initialize but don't configure USDC
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // User1 tries to stake
         vm.startPrank(user1);
@@ -379,7 +380,7 @@ contract Bridge1024Test is Test {
     function testTC008_StakeEvent_Integrity() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
@@ -420,7 +421,7 @@ contract Bridge1024Test is Test {
     
     function testTC101_AddRelayer_Admin() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Add relayers
         vm.expectEmit(true, false, false, false);
@@ -440,7 +441,7 @@ contract Bridge1024Test is Test {
     
     function testTC102_RemoveRelayer_Admin() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Add relayers
         bridge.addRelayer(relayer1);
@@ -462,7 +463,7 @@ contract Bridge1024Test is Test {
     
     function testTC103_AddRelayer_NonAdmin() public {
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Non-admin tries to add relayer
         vm.prank(nonAdmin);
@@ -472,7 +473,7 @@ contract Bridge1024Test is Test {
     
     function testTC103_RemoveRelayer_NonAdmin() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         bridge.addRelayer(relayer1);
         vm.stopPrank();
@@ -486,7 +487,7 @@ contract Bridge1024Test is Test {
     function testTC104_SubmitSignature_SingleRelayer() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -496,12 +497,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer3);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -526,7 +528,7 @@ contract Bridge1024Test is Test {
     function testTC105_SubmitSignature_ReachThreshold() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -536,12 +538,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer3);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -573,7 +576,7 @@ contract Bridge1024Test is Test {
     function testTC106_NonceIncreasing_SameNonce() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -587,8 +590,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -609,8 +612,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory replayEvent = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -627,7 +630,7 @@ contract Bridge1024Test is Test {
     function testTC106_NonceIncreasing_SmallerNonce() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -641,8 +644,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData2 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -662,8 +665,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -681,7 +684,7 @@ contract Bridge1024Test is Test {
     function testTC106_NonceIncreasing_LargerNonce() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -695,8 +698,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData1 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -716,8 +719,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData3 = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -740,7 +743,7 @@ contract Bridge1024Test is Test {
     function testTC107_SubmitSignature_InvalidSignature() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -750,12 +753,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer3);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -774,7 +778,7 @@ contract Bridge1024Test is Test {
     function testTC108_SubmitSignature_NonWhitelistedRelayer() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -784,12 +788,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer3);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -807,19 +812,20 @@ contract Bridge1024Test is Test {
     function testTC109_SubmitSignature_UsdcNotConfigured() public {
         // Initialize but don't configure USDC
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
         // Add relayers
         bridge.addRelayer(relayer1);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -836,7 +842,7 @@ contract Bridge1024Test is Test {
     function testTC110_SubmitSignature_WrongSourceContract() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -867,7 +873,7 @@ contract Bridge1024Test is Test {
     function testTC111_SubmitSignature_WrongChainId() public {
         // Initialize and configure
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -899,7 +905,7 @@ contract Bridge1024Test is Test {
     function testIT001_EndToEnd_EVMToSVM() public {
         // Step 1: Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -922,11 +928,12 @@ contract Bridge1024Test is Test {
         // For test, we simulate the reverse: SVM relayers submit to EVM receiver
         
         // Create event data (as if from SVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -953,7 +960,7 @@ contract Bridge1024Test is Test {
         // Similar to IT001 but in reverse direction
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, TARGET_CHAIN_ID, SOURCE_CHAIN_ID); // Reversed
         
@@ -964,11 +971,12 @@ contract Bridge1024Test is Test {
         vm.stopPrank();
         
         // Simulate receiving cross-chain request from SVM
+        // Note: configurePeer(TARGET_CHAIN_ID, SOURCE_CHAIN_ID) means receiver receives from SOURCE_CHAIN_ID
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: TARGET_CHAIN_ID,
-            targetChainId: SOURCE_CHAIN_ID,
+            sourceChainId: SOURCE_CHAIN_ID,  // From peer chain (receiver config is swapped)
+            targetChainId: TARGET_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user1),
@@ -992,7 +1000,7 @@ contract Bridge1024Test is Test {
     function testIT003_ConcurrentTransfers() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1008,8 +1016,8 @@ contract Bridge1024Test is Test {
             Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
                 sourceContract: peerContract,
                 targetContract: bytes32(uint256(uint160(address(bridge)))),
-                sourceChainId: SOURCE_CHAIN_ID,
-                targetChainId: TARGET_CHAIN_ID,
+                sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+                targetChainId: SOURCE_CHAIN_ID,  // To current chain
                 blockHeight: uint64(block.number),
                 amount: TEST_AMOUNT,
                 receiverAddress: addressToString(user2),
@@ -1033,7 +1041,7 @@ contract Bridge1024Test is Test {
     function testIT004_LargeAmountTransfer() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1049,8 +1057,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: largeAmount,
             receiverAddress: addressToString(user2),
@@ -1076,7 +1084,7 @@ contract Bridge1024Test is Test {
     function testST001_NonceProtection_ReplayAttack() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1090,8 +1098,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -1116,7 +1124,7 @@ contract Bridge1024Test is Test {
     function testST002_SignatureForgery() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1124,12 +1132,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer1);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -1147,7 +1156,7 @@ contract Bridge1024Test is Test {
     
     function testST003_AccessControl_AddRelayer() public {
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Non-admin tries to add relayer
         vm.prank(nonAdmin);
@@ -1157,7 +1166,7 @@ contract Bridge1024Test is Test {
     
     function testST003_AccessControl_RemoveRelayer() public {
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         bridge.addRelayer(relayer1);
         vm.stopPrank();
@@ -1170,7 +1179,7 @@ contract Bridge1024Test is Test {
     
     function testST004_VaultSecurity_DirectWithdraw() public {
         vm.prank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         
         // Contract acts as vault - check contract has balance
         // Since contract holds tokens directly, it needs proper access control
@@ -1182,7 +1191,7 @@ contract Bridge1024Test is Test {
     function testST004_VaultSecurity_InsufficientBalance() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1197,8 +1206,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: excessiveAmount,
             receiverAddress: addressToString(user2),
@@ -1231,7 +1240,7 @@ contract Bridge1024Test is Test {
     function testPT001_StakeLatency() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         vm.stopPrank();
@@ -1252,7 +1261,7 @@ contract Bridge1024Test is Test {
     function testPT002_SignatureSubmissionLatency() public {
         // Initialize system
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1260,12 +1269,13 @@ contract Bridge1024Test is Test {
         bridge.addRelayer(relayer1);
         vm.stopPrank();
         
-        // Create event data
+        // Create event data (from peer to EVM)
+        // Note: ChainIds match receiver state (swapped from configurePeer)
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -1288,7 +1298,7 @@ contract Bridge1024Test is Test {
     function testPT003_EndToEndLatency() public {
         // Measure complete cross-chain transfer flow
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1305,8 +1315,8 @@ contract Bridge1024Test is Test {
         Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
             sourceContract: peerContract,
             targetContract: bytes32(uint256(uint160(address(bridge)))),
-            sourceChainId: SOURCE_CHAIN_ID,
-            targetChainId: TARGET_CHAIN_ID,
+            sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+            targetChainId: SOURCE_CHAIN_ID,  // To current chain
             blockHeight: uint64(block.number),
             amount: TEST_AMOUNT,
             receiverAddress: addressToString(user2),
@@ -1333,7 +1343,7 @@ contract Bridge1024Test is Test {
     function testPT004_Throughput() public {
         // Test system can handle multiple transfers
         vm.startPrank(admin);
-        bridge.initialize(vault, admin);
+        bridge.initialize(admin);
         bridge.configureUsdc(address(usdc));
         bridge.configurePeer(peerContract, SOURCE_CHAIN_ID, TARGET_CHAIN_ID);
         
@@ -1350,8 +1360,8 @@ contract Bridge1024Test is Test {
             Bridge1024.StakeEventData memory eventData = Bridge1024.StakeEventData({
                 sourceContract: peerContract,
                 targetContract: bytes32(uint256(uint160(address(bridge)))),
-                sourceChainId: SOURCE_CHAIN_ID,
-                targetChainId: TARGET_CHAIN_ID,
+                sourceChainId: TARGET_CHAIN_ID,  // From peer chain
+                targetChainId: SOURCE_CHAIN_ID,  // To current chain
                 blockHeight: uint64(block.number),
                 amount: TEST_AMOUNT,
                 receiverAddress: addressToString(user2),

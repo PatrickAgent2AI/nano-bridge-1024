@@ -473,9 +473,8 @@ pub struct ReceiverState {
 
 **使用示例：**
 ```solidity
-// 初始化时，vault 和 admin 可以是多签钱包地址
+// 初始化时，admin 可以是多签钱包地址，vault 自动设置为合约本身
 initialize(
-    vaultAddress,  // 可以是 Gnosis Safe 多签钱包地址
     adminAddress   // 可以是 Gnosis Safe 多签钱包地址
 );
 

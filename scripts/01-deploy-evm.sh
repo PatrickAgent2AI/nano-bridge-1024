@@ -112,11 +112,9 @@ echo "浏览器: https://sepolia.arbiscan.io/address/${CONTRACT_ADDRESS}"
 # 初始化合约
 # ==============================================================================
 
-# 注意：vaultAddress 参数已废弃，合约内部使用 address(this) 作为金库
-# 但为了兼容性，仍然传入一个地址（会被忽略）
+# 注意：合约内部使用 address(this) 作为金库，不需要单独的 vault 地址
 INIT_OUTPUT=$(cast send "$CONTRACT_ADDRESS" \
-    "initialize(address,address)" \
-    "$ADMIN_ADDRESS" \
+    "initialize(address)" \
     "$ADMIN_ADDRESS" \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
