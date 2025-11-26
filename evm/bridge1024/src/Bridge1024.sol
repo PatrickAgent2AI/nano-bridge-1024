@@ -310,6 +310,8 @@ contract Bridge1024 {
             nonceSignature.eventData = eventData;
             nonceSignature.isUnlocked = false;
         } else {
+            if (nonceSignature.signedRelayers[msg.sender]) revert RelayerAlreadySigned();
+            
             // Verify that the submitted eventData matches the stored eventData
             // This prevents a malicious relayer from submitting different eventData
             if (
@@ -325,9 +327,6 @@ contract Bridge1024 {
                 revert InvalidEventData();
             }
         }
-        
-        // Check if relayer already signed
-        if (nonceSignature.signedRelayers[msg.sender]) revert RelayerAlreadySigned();
         
         // Verify ECDSA signature
         _verifyEcdsaSignature(eventData, signature, msg.sender);
