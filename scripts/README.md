@@ -128,6 +128,59 @@ SVM_CHAIN_ID=91024
 
 ---
 
+### 步骤 5: 充值 Relayer 账户（可选）
+
+```bash
+./05-fund-relayer.sh
+```
+
+**说明：**
+- 从 EVM 管理员账户转账 0.001 ETH 到 S2E Relayer 账户（用于支付 EVM gas 费用）
+- 为 E2S Relayer 账户申请 Solana airdrop（用于支付 SVM 交易费用）
+
+**前置条件：**
+- 已完成步骤 4（注册 Relayer）
+- EVM 管理员账户有足够的 ETH
+- SVM 测试网支持 airdrop（主网不支持）
+
+---
+
+### 步骤 6: 启动 Relayer 服务
+
+```bash
+./06-start-relayer.sh [start|stop|status]
+```
+
+**说明：**
+- 启动三个 relayer 组件：
+  - `s2e`: SVM → EVM 中继服务
+  - `e2s-listener`: EVM → SVM 事件监听器
+  - `e2s-submitter`: EVM → SVM 交易提交器
+- 所有输出重定向到 `relayer/logs/` 文件夹下的同名加时间戳的 log 文件
+- 三个进程的 PID 保存在 `relayer/` 文件夹下（`s2e.pid`, `e2s-listener.pid`, `e2s-submitter.pid`）
+
+**命令：**
+- `./06-start-relayer.sh` 或 `./06-start-relayer.sh start` - 启动所有服务
+- `./06-start-relayer.sh stop` - 停止所有服务
+- `./06-start-relayer.sh status` - 查看服务状态
+
+**日志文件：**
+- 日志保存在 `relayer/logs/` 目录
+- 文件名格式：`{component}_{YYYYMMDD_HHMMSS}.log`
+- 例如：`s2e_20251116_143022.log`
+
+**PID 文件：**
+- `relayer/s2e.pid`
+- `relayer/e2s-listener.pid`
+- `relayer/e2s-submitter.pid`
+
+**注意事项：**
+- 启动前确保已配置 relayer 的 `.env` 文件
+- 如果服务已在运行，启动命令会提示并跳过
+- 停止服务时会先尝试正常终止，必要时使用强制终止
+
+---
+
 ## 环境变量配置
 
 **重要：** 所有管理员和用户操作脚本都需要 `.env.invoke` 配置文件。
@@ -274,13 +327,25 @@ npx ts-node svm-admin.ts query_state
 # 6. 注册 Relayer（自动生成密钥并注册）
 ./04-register-relayer.sh
 
-# 7. 添加流动性
+# 7. 充值 Relayer 账户（可选，用于支付 gas 费用）
+./05-fund-relayer.sh
+
+# 8. 启动 Relayer 服务
+./06-start-relayer.sh start
+
+# 9. 添加流动性
 npx ts-node evm-admin.ts add_liquidity 100000000
 npx ts-node svm-admin.ts add_liquidity 100000000
 
-# 8. 测试跨链转账
+# 10. 测试跨链转账
 npx ts-node evm-user.ts stake 1000000 <SVM_RECEIVER_PUBKEY>
 npx ts-node svm-user.ts stake 1000000 <EVM_RECEIVER_ADDRESS>
+
+# 查看 Relayer 服务状态
+./06-start-relayer.sh status
+
+# 停止 Relayer 服务
+./06-start-relayer.sh stop
 ```
 
 ---

@@ -10,3 +10,5 @@ test-ledger/
 .backup_*
 relayer/**/.relayer
 !.env.*.example
+relayer/*.pid
+relayer/logs

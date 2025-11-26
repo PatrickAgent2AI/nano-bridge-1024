@@ -167,13 +167,17 @@ cd scripts
 ./04-register-relayer.sh
 # 之后假设 relayer 账户拥有充足的SOL和ETH支付交易费，因此需要手动向这些账户充值
 
-# 5. 添加流动性：管理员从自己的账户向金库地址转入USDC
+# 5. 充值 Relayer 账户（可选，用于支付 gas 费用）
+./05-fund-relayer.sh
+
+# 6. 启动 Relayer 服务
+./06-start-relayer.sh start
+
+# 7. 添加流动性：管理员从自己的账户向金库地址转入USDC
 npx ts-node evm-admin.ts add_liquidity 100000000
 npx ts-node svm-admin.ts add_liquidity 100000000
 
-# 6. 开启 relayer 服务
-
-# 7. 测试跨链转账
+# 8. 测试跨链转账
 npx ts-node svm-user.ts balance
 npx ts-node evm-user.ts stake 100 <SVM_RECEIVER_PUBKEY>
 npx ts-node svm-user.ts balance # 确认SVM余额增加
@@ -239,12 +243,14 @@ npx ts-node evm-user.ts balance # 确认EVM余额增加
 
 ### 部署和运维脚本
 
-- **scripts/**：部署和操作脚本（TypeScript + Shell）- **已精简至 10 个核心脚本**
+- **scripts/**：部署和操作脚本（TypeScript + Shell）- **已精简至 11 个核心脚本**
   - **部署脚本**：
     - `01-deploy-evm.sh`：自动化部署 EVM 合约到 Arbitrum Sepolia
     - `02-deploy-svm.sh`：自动化部署 SVM 合约到 1024chain（支持升级/全新部署）
     - `03-config-usdc-peer.sh`：配置 USDC 地址和对端合约地址
     - `04-register-relayer.sh`：自动生成并注册 Relayer 密钥对
+    - `05-fund-relayer.sh`：为 Relayer 账户充值（ETH 和 SOL）
+    - `06-start-relayer.sh`：启动/停止 Relayer 服务（s2e, e2s-listener, e2s-submitter）
   - **管理脚本**：
     - `evm-admin.ts`：EVM 合约管理操作（查询状态、配置、relayer 管理、流动性管理）
     - `svm-admin.ts`：SVM 合约管理操作（查询状态、配置、relayer 管理、流动性管理）
