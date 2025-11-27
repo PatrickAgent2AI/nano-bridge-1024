@@ -137,7 +137,7 @@ sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
 solana-keygen new -o ~/.config/solana/id.json
 ```
 
-### 一键部署流程
+### 快速部署流程（单relayer模式）
 
 ```bash
 cp .env.evm.deploy.example .env.evm.deploy
