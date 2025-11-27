@@ -12,7 +12,7 @@
 - ✅ **Scripts 目录清理和优化** ⭐
   - ✅ 删除 6 个临时/重复脚本（check-request-status.ts, check-transaction.ts, remove-relayer.ts, init-svm-fresh.sh, redeploy-svm.sh, start-relayer.sh）
   - ✅ 增强 `02-deploy-svm.sh`：支持升级部署/全新部署选择、自动备份旧密钥对、生成新 Program ID
-  - ✅ 脚本数量从 16 个精简到 10 个核心脚本
+  - ✅ 脚本数量从 16 个精简到 11 个核心脚本
   - ✅ 保留完整的部署→配置→管理→用户操作流程
 - ✅ **S2E Relayer (SVM→EVM) 完整实现并测试通过** ⭐⭐⭐
   - ✅ SVM 事件监听器（Solana RPC HTTP API 轮询）
