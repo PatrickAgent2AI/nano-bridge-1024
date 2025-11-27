@@ -12,6 +12,11 @@ pub fn load_config() -> Result<SubmitterConfig> {
     let mut config = Config::load()?;
     config.service.name = "e2s-submitter".to_string();
     
+    // e2s-submitter 默认端口为 8082
+    if config.api.port == 8080 {
+        config.api.port = 8082;
+    }
+    
     Ok(config)
 }
 

@@ -158,26 +158,29 @@ cd scripts
 # 2. 部署 SVM 合约（选择升级或全新部署）
 ./02-deploy-svm.sh
 
+# 检查并确保 PEER_CONTRACT_ADDRESS_FOR_EVM 和 PEER_CONTRACT_ADDRESS_FOR_SVM 配置正确
+vim ../.env.invoke  
+
 # 3. 配置 USDC 和对端地址
 cd -
 cd scripts
 ./03-config-usdc-peer.sh
 
-# 4. 注册 Relayer（自动生成密钥）
+# 4.1 注册 Relayer（自动生成密钥）
 ./04-register-relayer.sh
 # 之后假设 relayer 账户拥有充足的SOL和ETH支付交易费，因此需要手动向这些账户充值
 
-# 5. 充值 Relayer 账户（可选，用于支付 gas 费用）
+# 4.2 充值 Relayer 账户（可选，用于支付 gas 费用）
 ./05-fund-relayer.sh
 
-# 6. 启动 Relayer 服务
+# 4.3 启动 Relayer 服务
 ./06-start-relayer.sh start
 
-# 7. 添加流动性：管理员从自己的账户向金库地址转入USDC
+# 5 添加流动性：管理员从自己的账户向金库地址转入USDC
 npx ts-node evm-admin.ts add_liquidity 100000000
 npx ts-node svm-admin.ts add_liquidity 100000000
 
-# 8. 测试跨链转账
+# 6. 测试跨链转账
 npx ts-node svm-user.ts balance
 npx ts-node evm-user.ts stake 100 <SVM_RECEIVER_PUBKEY>
 npx ts-node svm-user.ts balance # 确认SVM余额增加
@@ -188,6 +191,36 @@ npx ts-node evm-user.ts balance # 确认EVM余额增加
 ```
 
 详细说明见 [scripts/README.md](scripts/README.md)
+
+### 使用 Docker 部署 Relayer
+
+主要不同的是上面的第四步
+
+```bash
+# 确保完成上面的1~3步
+
+cd scripts
+# 4.1 生成新的relayer密钥
+./04-register-relayer.sh    # 选择y覆盖现有密钥
+
+cd ../relayer
+# 4.2 初始化relayer配置文件和日志文件夹
+./init-new-relayer.sh 1   # 将env文件统一复制到一个文件夹，并修改submitter的QUEUE__PATH
+
+# 4.3 启动relayer容器
+./start-container.sh 1    
+
+# 4.4 检查relayer容器是否启动成功
+docker ps | grep relayer-container-relayer1
+
+# 4.5 运行下一个relayer
+cd ../scripts
+./04-register-relayer.sh    # 选择y覆盖现有密钥
+cd ../relayer
+./init-new-relayer.sh 2   
+./start-container.sh 2    
+docker ps | grep relayer-container-relayer2
+```
 
 ## 使用方法
 

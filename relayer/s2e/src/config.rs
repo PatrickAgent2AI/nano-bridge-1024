@@ -12,9 +12,9 @@ pub fn load_s2e_config() -> Result<S2EConfig> {
     let mut config = Config::load()?;
     config.service.name = "s2e".to_string();
     
-    // S2E 默认端口为 8083
-    if config.api.port == 8082 {
-        config.api.port = 8083;
+    // S2E 默认端口为 8081
+    if config.api.port == 8080 {
+        config.api.port = 8081;
     }
     
     Ok(config)

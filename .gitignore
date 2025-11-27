@@ -12,3 +12,4 @@ relayer/**/.relayer
 !.env.*.example
 relayer/*.pid
 relayer/logs
+relayer/.*
