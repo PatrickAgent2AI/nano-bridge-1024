@@ -16,6 +16,15 @@ use solana_sdk::{
 use std::{path::Path, str::FromStr};
 use tracing::{error, info, warn};
 
+/// 错误类型分类
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ErrorCategory {
+    /// 可重试错误：网络错误、RPC超时、gas估算失败等
+    Retryable,
+    /// 不可重试错误：InvalidNonce、签名验证失败、权限错误等
+    NonRetryable,
+}
+
 /// 启动事件处理器
 pub async fn start_processor(config: SubmitterConfig) -> Result<()> {
     info!("Starting event processor");
@@ -103,12 +112,31 @@ async fn process_queue(
                                     processed += 1;
                                 }
                                 Err(e) => {
-                                    error!(
-                                        nonce = event.nonce,
-                                        error = %e,
-                                        "Failed to process event"
-                                    );
-                                    // 保留文件以便重试
+                                    // 分析错误类型
+                                    let error_str = format!("{}", e);
+                                    let error_category = categorize_error(&error_str, &e);
+                                    
+                                    match error_category {
+                                        ErrorCategory::NonRetryable => {
+                                            // 不可重试错误：删除文件，避免无限重试
+                                            warn!(
+                                                nonce = event.nonce,
+                                                error = %e,
+                                                "Non-retryable error, removing event file"
+                                            );
+                                            if let Err(remove_err) = std::fs::remove_file(&path) {
+                                                warn!("Failed to remove non-retryable event file: {}", remove_err);
+                                            }
+                                        }
+                                        ErrorCategory::Retryable => {
+                                            // 可重试错误：保留文件以便重试
+                                            error!(
+                                                nonce = event.nonce,
+                                                error = %e,
+                                                "Retryable error, keeping file for retry"
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -206,22 +234,30 @@ async fn submit_signature(
     );
 
     // 先模拟交易以获取详细错误信息
+    let mut simulation_error: Option<(String, Option<Vec<String>>)> = None;
     match rpc_client.simulate_transaction(&transaction) {
         Ok(sim_result) => {
             if let Some(err) = sim_result.value.err {
+                let error_msg = format!("Transaction simulation failed: {:?}\nLogs: {:?}", err, sim_result.value.logs);
                 error!(
                     nonce = event.nonce,
                     error = ?err,
                     logs = ?sim_result.value.logs,
                     "Transaction simulation failed"
                 );
-                return Err(anyhow!("Transaction simulation failed: {:?}\nLogs: {:?}", err, sim_result.value.logs));
+                simulation_error = Some((error_msg, sim_result.value.logs));
+            } else {
+                info!(nonce = event.nonce, "Transaction simulation succeeded");
             }
-            info!(nonce = event.nonce, "Transaction simulation succeeded");
         }
         Err(e) => {
             warn!(nonce = event.nonce, error = %e, "Failed to simulate transaction, proceeding anyway");
         }
+    }
+
+    // 如果模拟失败，返回错误（包含日志信息用于错误分类）
+    if let Some((err_msg, _logs)) = simulation_error {
+        return Err(anyhow!("{}", err_msg));
     }
 
     // 发送交易
@@ -231,8 +267,9 @@ async fn submit_signature(
             Ok(sig.to_string())
         }
         Err(e) => {
+            let error_msg = format!("Failed to send transaction: {}", e);
             error!(nonce = event.nonce, error = %e, "Failed to send transaction");
-            Err(anyhow!("Failed to send transaction: {}", e))
+            Err(anyhow!("{}", error_msg))
         }
     }
 }
@@ -341,5 +378,54 @@ fn create_submit_signature_instruction(
         accounts,
         data,
     })
+}
+
+/// 分类错误类型：可重试 vs 不可重试
+/// 
+/// 核心逻辑：合约错误（Anchor错误码6000-6999）不可重试，其他错误可重试
+fn categorize_error(error_str: &str, _error: &anyhow::Error) -> ErrorCategory {
+    // 提取错误码：尝试从多种格式中提取
+    // 1. Custom(6005)
+    if let Some(start) = error_str.find("Custom(") {
+        if let Some(end) = error_str[start..].find(')') {
+            if let Ok(code) = error_str[start + 7..start + end].parse::<u32>() {
+                if code >= 6000 && code < 7000 {
+                    return ErrorCategory::NonRetryable;
+                }
+            }
+        }
+    }
+    
+    // 2. 0x1775 (十六进制)
+    if let Some(start) = error_str.find("0x") {
+        let hex_str = &error_str[start + 2..];
+        let end = hex_str.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+        if end > 0 {
+            if let Ok(code) = u32::from_str_radix(&hex_str[..end], 16) {
+                if code >= 6000 && code < 7000 {
+                    return ErrorCategory::NonRetryable;
+                }
+            }
+        }
+    }
+    
+    // 3. Error Number: 6005
+    let error_lower = error_str.to_lowercase();
+    if let Some(start) = error_lower.find("error number:") {
+        let num_str = error_lower[start + 14..].split_whitespace().next().unwrap_or("");
+        if let Ok(code) = num_str.parse::<u32>() {
+            if code >= 6000 && code < 7000 {
+                return ErrorCategory::NonRetryable;
+            }
+        }
+    }
+    
+    // 4. 如果包含 "custom program error" 但没有提取到错误码，也认为是合约错误
+    if error_lower.contains("custom program error") {
+        return ErrorCategory::NonRetryable;
+    }
+    
+    // 其他错误默认可重试
+    ErrorCategory::Retryable
 }
 
