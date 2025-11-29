@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::{CorsLayer, Any};
+use axum::http::HeaderName;
 use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
@@ -190,10 +191,16 @@ async fn main() -> Result<()> {
     };
 
     // 配置 CORS
+    // 注意：当 allow_credentials(true) 时，不能使用 Any 作为 allow_headers
+    // 必须明确指定允许的请求头
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin.parse::<axum::http::HeaderValue>().unwrap())
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
-        .allow_headers(Any)
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("accept"),
+        ])
         .allow_credentials(true);
     
     info!(
@@ -274,6 +281,17 @@ async fn stake_to_1024chain(
     let amount: U256 = amount_str
         .parse()
         .context("Failed to parse amount")?;
+
+    // 验证 amount 不超过 uint64::MAX，因为事件中会转换为 uint64
+    // uint64::MAX = 18,446,744,073,709,551,615
+    const U64_MAX: u64 = u64::MAX;
+    if amount > U256::from(U64_MAX) {
+        return Err(anyhow::anyhow!(
+            "Amount {} exceeds uint64::MAX ({})",
+            amount,
+            U64_MAX
+        ));
+    }
 
     // 使用 Mutex 序列化关键操作，避免并发问题：
     // 1. 余额检查竞态条件
@@ -361,9 +379,12 @@ async fn stake_to_1024chain(
 
     let tx_hash = format!("{:?}", stake_receipt.transaction_hash);
 
+    // 验证事件中的amount是否正确（通过解析receipt中的事件）
+    // 注意：这里我们只是记录，实际的验证由relayer完成
     info!(
         tx_hash = %tx_hash,
         amount = %amount,
+        amount_u64 = %amount.as_u64(),
         receiver = %receiver_address,
         "Stake transaction confirmed"
     );
