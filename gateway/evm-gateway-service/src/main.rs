@@ -18,6 +18,7 @@ use ethers::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tower_http::cors::{CorsLayer, Any};
 use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +130,10 @@ async fn main() -> Result<()> {
         .parse::<u16>()
         .context("Invalid PORT")?;
 
+    // CORS 配置：从环境变量读取允许的源，默认允许 localhost:3000
+    let allowed_origin = std::env::var("CORS_ALLOW_ORIGIN")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+
     // 创建 Provider
     let provider = Provider::<Http>::try_from(rpc_url.clone())
         .context("Failed to create provider")?;
@@ -184,9 +189,22 @@ async fn main() -> Result<()> {
         tx_mutex: Arc::new(Mutex::new(())),
     };
 
+    // 配置 CORS
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origin.parse::<axum::http::HeaderValue>().unwrap())
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers(Any)
+        .allow_credentials(true);
+    
+    info!(
+        cors_origin = %allowed_origin,
+        "CORS configured"
+    );
+
     // 创建路由
     let app = Router::new()
         .route("/stake", post(handle_stake))
+        .layer(cors)
         .with_state(state);
 
     // 启动服务器
