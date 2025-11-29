@@ -7,8 +7,8 @@ export const config = {
     apiKey: process.env.LIFI_API_KEY || undefined,
   },
   arbitrum: {
-    rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc',
-    chainId: parseInt(process.env.ARBITRUM_CHAIN_ID || '421614', 10),
+    rpcUrl: process.env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc',
+    chainId: parseInt(process.env.ARBITRUM_CHAIN_ID || '42161', 10),
     usdcAddress: process.env.ARBITRUM_USDC_ADDRESS || '',
   },
   wallet: {
