@@ -6,6 +6,7 @@
 - [智能合约 API](#智能合约-api)
   - [发送端合约 API](#发送端合约-api)
   - [接收端合约 API](#接收端合约-api)
+- [Gateway 服务 API](#gateway-服务-api)
 - [Relayer 服务 API](#relayer-服务-api)
 - [模块间调用规约](#模块间调用规约)
 - [数据结构](#数据结构)
@@ -30,6 +31,12 @@
 | 接收端合约 | 签名验证 | `submitSignature` | `onlyWhitelistedRelayer` | `eventData`, `signature` | 无 | 提交签名，达到阈值后解锁代币 |
 | 接收端合约 | 流动性管理 | `addLiquidity` | `onlyAdmin` | `amount` | 无 | 从多签钱包向PDA金库增加流动性 |
 | 接收端合约 | 流动性管理 | `withdrawLiquidity` | `onlyAdmin` | `amount` | 无 | 从PDA金库向多签钱包提取流动性 |
+
+### Gateway 服务 API 总览表
+
+| 模块 | 类别 | 功能名称 | 权限 | 主要参数 | 输出 | 功能效果 |
+|------|------|----------|------|----------|------|----------|
+| Gateway服务 | HTTP API | `POST /stake` | 公开 | `amount`, `target_address` | `success`, `message`, `tx_hash` | 接收跨链请求，调用 EVM stake 接口完成从 Arbitrum 到 1024chain 的跨链 |
 
 ### Relayer 服务 API 总览表
 
@@ -516,6 +523,109 @@ await program.methods
 - 程序地址：`SMPLecH534NA9acB4bMolv7X6RBpK4rjn3LkN1gZXYjy`
 - 主要功能：创建多签账户、提案和投票、执行提案
 - 多签投票在外部处理，合约不关心多签逻辑
+
+---
+
+## Gateway 服务 API
+
+### EVM Gateway Service API
+
+EVM Gateway Service 提供 HTTP API，用于完成从 Arbitrum 到 1024chain 的跨链转账。
+
+#### API 总览表
+
+| 端点 | 方法 | 功能 | 请求参数 | 响应 | 说明 |
+|------|------|------|----------|------|------|
+| `/stake` | POST | 调用 EVM stake 合约接口 | `amount`, `target_address` | `success`, `message`, `tx_hash` | 完成从 Arbitrum 到 1024chain 的跨链 |
+
+#### POST /stake
+
+调用 EVM stake 合约接口，完成从 Arbitrum 到 1024chain 的跨链。
+
+**请求体：**
+```json
+{
+  "amount": "1000000",
+  "target_address": "1024chain接收地址"
+}
+```
+
+**参数说明：**
+- `amount`：USDC 金额（字符串格式，最小单位，例如 "1000000" = 1 USDC，假设 6 位小数）
+- `target_address`：1024chain 上的接收地址（字符串格式）
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "message": "Stake successful",
+  "tx_hash": "0x..."
+}
+```
+
+**错误响应：**
+```json
+{
+  "success": false,
+  "message": "错误信息",
+  "tx_hash": null
+}
+```
+
+**功能流程：**
+1. 检查中转钱包的 USDC 余额
+2. 如果余额不足，返回错误
+3. 检查 USDC allowance
+4. 如果 allowance 不足，自动调用 `approve` 函数（使用最大授权金额 10^18）
+5. 调用 EVM stake 合约接口
+6. 等待交易确认
+7. 返回交易哈希
+
+**示例请求：**
+```bash
+curl -X POST http://localhost:8084/stake \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": "1000000",
+    "target_address": "1024chain接收地址"
+  }'
+```
+
+**使用 CLI 工具：**
+```bash
+# 查看帮助
+./gateway-cli.sh help
+
+# 质押 USDC
+./gateway-cli.sh stake 1000000 "1024chain_receiver_address"
+
+# 使用自定义服务地址
+GATEWAY_URL=http://localhost:8084 ./gateway-cli.sh stake 1000000 "address"
+```
+
+### 配置参数
+
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|--------|----------|--------|------|
+| RPC 地址 | `RPC_URL` | 无 | Arbitrum RPC 地址 |
+| 私钥 | `PRIVATE_KEY` | 无 | 中转钱包私钥（hex 格式，带或不带 0x 前缀） |
+| Bridge 合约地址 | `BRIDGE_CONTRACT_ADDRESS` | 无 | EVM Bridge 合约地址 |
+| USDC 合约地址 | `USDC_CONTRACT_ADDRESS` | 无 | USDC ERC20 合约地址 |
+| 链 ID | `CHAIN_ID` | 421614 | Arbitrum Sepolia 链 ID |
+| 服务端口 | `PORT` | 8084 | HTTP 服务监听端口 |
+
+### 架构说明
+
+**与 Relayer 的区别：**
+- **Relayer**：监听链上事件、签名验证、多签提交（双向跨链）
+- **Gateway**：接收外部 HTTP 请求，使用中转钱包调用 EVM stake 接口（单向：Arbitrum → 1024chain）
+
+**工作流程：**
+1. 用户使用成熟的跨链桥（如 LiFi）将资产从任意链跨链到 Arbitrum
+2. USDC 转入中转钱包地址
+3. Gateway 服务接收 HTTP 请求
+4. 服务使用中转钱包调用 EVM stake 合约接口
+5. 完成从 Arbitrum 到 1024chain 的第二步跨链
 
 ---
 

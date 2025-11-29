@@ -4,6 +4,8 @@
 
 本项目是一个基于多签验证的跨链桥系统，支持在 EVM 链（Arbitrum Sepolia）和 SVM 链（1024chain）之间进行 USDC 代币的跨链转移。系统采用质押-解锁机制，通过多个独立的 relayer 进行多签验证，确保跨链转账的安全性。
 
+**扩展功能：** 支持从任意链到 1024chain 的跨链转账（通过成熟的跨链桥如 LiFi 实现第一步，本仓库的 cross-chain-gateway 服务完成第二步）。
+
 ## 开发状态
 
 **当前阶段：** M4 - Relayer 服务开发（**S2E Relayer 完整实现并验证成功** ✅）
@@ -200,6 +202,25 @@ docker ps | grep relayer-container-relayer2
   - **HTTP API**：健康检查、状态查询、Prometheus 指标
   - **高性能架构**：Tokio 异步运行时 + 文件队列（e2s）/ 内存队列（s2e）
   - 详细设计见 [relayer/README.md](relayer/README.md)
+
+### 跨链网关服务
+
+- **gateway/**：跨链网关服务（Rust 实现 🦀）
+  - **evm-gateway-service**：EVM 网关服务 ✅ **已实现**
+    - **任意链 → Arbitrum → 1024chain**：✅ **已实现**
+      - HTTP API 接收跨链请求（参数：USDC 金额、目标地址）
+      - 使用中转钱包调用 EVM stake 合约接口
+      - 自动检查 USDC 余额
+      - 自动处理 USDC 授权（approve）
+      - 完成从 Arbitrum 到 1024chain 的第二步跨链
+      - HTTP API（端口 8084，可配置）
+      - 详细说明：[gateway/README.md](gateway/README.md)
+  - **1024chain → 任意链**：⏳ **待实现**
+    - 文档代码暂时留空，待完成当前模块后详述
+  - **架构说明**：与 `relayer` 不是层级关系，而是独立的服务模块
+    - `relayer`：负责监听链上事件、签名验证、多签提交（双向跨链）
+    - `evm-gateway`：负责接收外部 HTTP 请求，使用中转钱包调用 EVM stake 接口（单向：Arbitrum → 1024chain）
+    - **工作流程**：用户使用成熟跨链桥（如 LiFi）从任意链跨链到 Arbitrum，USDC 转入中转钱包 → 本服务接收 HTTP 请求 → 调用 EVM stake 接口完成第二步跨链到 1024chain
 
 ### 部署和运维脚本
 

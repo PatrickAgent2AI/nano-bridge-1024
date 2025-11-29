@@ -7,6 +7,7 @@
 - [数据存储设计](#数据存储设计)
 - [SVM 合约设计](#svm-合约设计)
 - [EVM 合约设计](#evm-合约设计)
+- [Gateway 服务设计](#gateway-服务设计)
 - [Relayer 服务设计](#relayer-服务设计)
 - [安全考虑](#安全考虑)
 
@@ -597,6 +598,82 @@ struct ReceiverState {
 1. **initialize**: 初始化合约（设置vault和admin，可以是多签钱包地址）
 2. **configure_usdc**: 配置USDC ERC20合约地址（必须在使用前配置）
 3. **configure_peer**: 配置对端合约和链ID
+
+---
+
+## Gateway 服务设计
+
+### 概述
+
+Gateway 服务是一个独立的 HTTP 服务，用于完成跨链桥的第二步：从 Arbitrum 到 1024chain。与 Relayer 服务不同，Gateway 服务不监听链上事件，而是接收外部 HTTP 请求。
+
+### 架构设计
+
+**与 Relayer 的区别：**
+- **Relayer**：监听链上事件、签名验证、多签提交（双向跨链）
+- **Gateway**：接收外部 HTTP 请求，使用中转钱包调用 EVM stake 接口（单向：Arbitrum → 1024chain）
+
+**工作流程：**
+1. 用户使用成熟的跨链桥（如 LiFi）将资产从任意链跨链到 Arbitrum
+2. USDC 转入中转钱包地址
+3. Gateway 服务接收 HTTP 请求（参数：USDC 金额、目标地址）
+4. 服务使用中转钱包调用 EVM stake 合约接口
+5. 完成从 Arbitrum 到 1024chain 的第二步跨链
+
+### EVM Gateway Service 设计
+
+#### 功能模块
+
+1. **HTTP API 服务器**
+   - 使用 Axum 框架（Rust）
+   - 接收 POST `/stake` 请求
+   - 请求参数：`amount`（USDC 金额，字符串格式）、`target_address`（1024chain 接收地址）
+   - 返回：`success`、`message`、`tx_hash`
+
+2. **USDC 余额检查**
+   - 自动检查中转钱包的 USDC 余额
+   - 如果余额不足，返回错误信息
+
+3. **USDC 授权管理**
+   - 自动检查 USDC allowance
+   - 如果 allowance 不足，自动调用 `approve` 函数
+   - 使用最大授权金额（10^18），避免频繁 approve 操作
+
+4. **交易发送**
+   - 使用 Mutex 序列化交易发送，避免 nonce 冲突和余额检查竞态
+   - 调用 EVM stake 合约接口
+   - 等待交易确认并返回交易哈希
+
+#### 技术栈
+
+- **异步运行时**：Tokio 1.35
+- **HTTP 框架**：Axum 0.7
+- **EVM 交互**：Ethers-rs 2.0
+- **日志系统**：tracing + tracing-subscriber
+- **配置管理**：dotenvy（环境变量）
+
+#### 配置参数
+
+- `RPC_URL`：Arbitrum RPC 地址
+- `PRIVATE_KEY`：中转钱包私钥（hex 格式，带或不带 0x 前缀）
+- `BRIDGE_CONTRACT_ADDRESS`：Bridge 合约地址
+- `USDC_CONTRACT_ADDRESS`：USDC ERC20 合约地址
+- `CHAIN_ID`：链 ID（默认 421614，Arbitrum Sepolia）
+- `PORT`：HTTP 服务端口（默认 8084）
+
+#### 安全考虑
+
+1. **私钥管理**：私钥通过环境变量配置，不应硬编码
+2. **并发控制**：使用 Mutex 序列化关键操作，避免 nonce 冲突
+3. **余额检查**：每次请求前检查余额，防止余额不足的交易
+4. **授权管理**：使用最大授权金额，减少 approve 操作频率
+
+#### 未来扩展
+
+- **1024chain → 任意链**：待实现
+  - 监听 1024chain 事件
+  - 调用 SVM stake 接口
+  - 完成从 1024chain 到任意链的跨链
 
 ---
 

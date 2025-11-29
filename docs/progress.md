@@ -540,6 +540,33 @@
     - 保留完整的部署→配置→管理→用户操作→服务启动流程
     - 提高可维护性和易用性
 
+### 最新进展（2025-01-XX）
+
+#### Gateway 模块开发
+✅ **EVM Gateway Service 实现**
+  - ✅ 创建 `gateway/evm-gateway-service` 服务目录（与 `relayer` 独立，非层级关系）
+  - ✅ 实现 HTTP API 服务（接收 USDC 金额、目标地址参数）
+  - ✅ 使用中转钱包调用 EVM stake 合约接口
+  - ✅ 自动检查 USDC 余额
+  - ✅ 自动处理 USDC 授权（approve）
+  - ✅ 使用 Mutex 序列化交易发送，避免 nonce 冲突和余额检查竞态
+  - ✅ 返回交易哈希
+  - ✅ 代码逻辑简洁，保持最小依赖
+  - ✅ 创建 README 文档和配置示例
+  - ✅ 提供 CLI 工具（gateway-cli.sh）方便调用
+  - ⏳ 1024chain到任意链模块：文档代码暂时留空，待完成当前模块后详述
+
+**架构说明：**
+- **工作流程**：用户使用成熟跨链桥（如 LiFi）从任意链跨链到 Arbitrum，USDC 转入中转钱包 → 本服务接收 HTTP 请求 → 调用 EVM stake 接口完成第二步跨链到 1024chain
+- **与 relayer 的区别**：
+  - `relayer`：负责监听链上事件、签名验证、多签提交（双向跨链）
+  - `evm-gateway`：负责接收外部 HTTP 请求，使用中转钱包调用 EVM stake 接口（单向：Arbitrum → 1024chain）
+- **技术实现**：
+  - Rust + Tokio + Axum（HTTP 框架）
+  - Ethers-rs 2.0（EVM 交互）
+  - 支持环境变量配置（RPC_URL, PRIVATE_KEY, BRIDGE_CONTRACT_ADDRESS, USDC_CONTRACT_ADDRESS, CHAIN_ID, PORT）
+  - 默认端口：8084（可配置）
+
 ### 下周计划（2025-11-17 ~ 2025-11-23）
 
 - [ ] **M5阶段 - 测试网集成测试**
@@ -553,6 +580,10 @@
   - [ ] 性能和压力测试
     - [ ] 大量并发交易测试
     - [ ] Relayer 负载测试
+- [ ] **Cross-Chain Gateway 测试**
+  - [ ] 端到端测试（任意链 → Arbitrum → 1024chain）
+  - [ ] HTTP API 测试
+  - [ ] 错误处理测试
 - [ ] **M2阶段收尾工作**（优先级较低）
   - [ ] EVM 合约剩余测试修复
   - [ ] 完善测试覆盖率
