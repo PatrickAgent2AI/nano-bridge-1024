@@ -274,9 +274,15 @@ async fn stake_to_1024chain(
     receiver_address: &str,
 ) -> Result<String> {
     // 解析金额（支持字符串格式的大数）
-    let amount: U256 = amount_str
-        .parse()
-        .context("Failed to parse amount")?;
+    // 注意：U256::from_dec_str 用于解析十进制字符串，避免被误解析为十六进制
+    let amount: U256 = U256::from_dec_str(amount_str)
+        .context("Failed to parse amount as decimal")?;
+
+    info!(
+        amount_str = %amount_str,
+        amount_parsed = %amount,
+        "Parsed amount from string"
+    );
 
     // 使用 Mutex 序列化关键操作，避免并发问题：
     // 1. 余额检查竞态条件
@@ -291,6 +297,12 @@ async fn stake_to_1024chain(
         .call()
         .await
         .context("Failed to check USDC balance")?;
+
+    info!(
+        balance = %balance,
+        required_amount = %amount,
+        "Checking USDC balance"
+    );
 
     if balance < amount {
         error!(
@@ -348,6 +360,13 @@ async fn stake_to_1024chain(
 
     // 3. 调用 stake 函数
     let receiver_addr = receiver_address.to_string();
+    
+    info!(
+        amount_before_call = %amount,
+        receiver = %receiver_addr,
+        "Calling stake method"
+    );
+    
     let method = state
         .bridge_contract
         .method::<_, u64>("stake", (amount, receiver_addr))
