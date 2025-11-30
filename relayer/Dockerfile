@@ -25,4 +25,11 @@ COPY e2s-submitter /app/e2s-submitter
 COPY shared /app/shared
 COPY start-relayer-indocker.sh /app/start-relayer-indocker.sh
 
+RUN chmod +x /app/start-relayer-indocker.sh
+
+# 启动三个 relayer 组件
+RUN cd /app/s2e && cargo build --release
+RUN cd /app/e2s-listener &&cargo build --release
+RUN cd /app/e2s-submitter &&cargo build --release
+
 CMD ["tail", "-f", "/dev/null"]

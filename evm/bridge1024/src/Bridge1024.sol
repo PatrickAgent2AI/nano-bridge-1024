@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
  * @title Bridge1024
@@ -223,12 +224,13 @@ contract Bridge1024 {
         senderState.nonce = newNonce;
         
         // Emit stake event
+        // Use SafeCast to ensure amount fits in uint64 without truncation
         emit StakeEvent(
             bytes32(uint256(uint160(address(this)))),
             senderState.targetContract,
             senderState.sourceChainId,
-            uint64(block.number),
-            uint64(amount),
+            SafeCast.toUint64(block.number),
+            SafeCast.toUint64(amount),
             receiverAddress,
             newNonce
         );
