@@ -18,7 +18,7 @@ use ethers::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
@@ -193,7 +193,10 @@ async fn main() -> Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(allowed_origin.parse::<axum::http::HeaderValue>().unwrap())
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
-        .allow_headers(Any)
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+        ])
         .allow_credentials(true);
     
     info!(
