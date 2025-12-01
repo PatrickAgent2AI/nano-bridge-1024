@@ -39,7 +39,7 @@ if [ "$USDC_DIFFERENCE" -ne 89730 ]; then
 fi
 USDC_RAW_AMOUNT_BEFORE=$USDC_RAW_AMOUNT_AFTER
 
-cd ../gateway/evm-gateway-service
+cd ../broker/evm-gateway-service
 ./gateway-cli.sh stake 89730 3VhnTppDywZUc1ti4DpfiaAH1Wit67yz6iofi9eCYHTn
 
 USDC_RAW_AMOUNT_AFTER=$(npx ts-node svm-user.ts balance | awk -F': ' '/USDC Balance \(最小单位\)/ {gsub(/\r/,"",$2); print $2}' | tr -d ' ')

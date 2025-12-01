@@ -205,7 +205,7 @@ docker ps | grep relayer-container-relayer2
 
 ### 跨链网关服务
 
-- **gateway/**：跨链网关服务（Rust 实现 🦀）
+- **broker/**：跨链网关服务（Rust 实现 🦀）
   - **evm-gateway-service**：EVM 网关服务 ✅ **已实现**
     - **任意链 → Arbitrum → 1024chain**：✅ **已实现**
       - HTTP API 接收跨链请求（参数：USDC 金额、目标地址）
@@ -214,7 +214,7 @@ docker ps | grep relayer-container-relayer2
       - 自动处理 USDC 授权（approve）
       - 完成从 Arbitrum 到 1024chain 的第二步跨链
       - HTTP API（端口 8084，可配置）
-      - 详细说明：[gateway/README.md](gateway/README.md)
+      - 详细说明：[broker/README.md](broker/README.md)
   - **1024chain → 任意链**：⏳ **待实现**
     - 文档代码暂时留空，待完成当前模块后详述
   - **架构说明**：与 `relayer` 不是层级关系，而是独立的服务模块
