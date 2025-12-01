@@ -32,3 +32,5 @@ app.listen(port, () => {
   console.log(`LiFi API Key: ${config.lifi.apiKey ? 'Configured' : 'Not configured'}`);
 });
 
+
+

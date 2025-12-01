@@ -422,7 +422,7 @@ async function queryBalance() {
   printHeader('查询用户余额');
 
   const config = loadConfig();
-  const connection = new Connection(config.rpcUrl, 'confirmed');
+  const connection = createConnection(config.rpcUrl);
   const userKeypair = config.userKeypair;
 
   try {
@@ -436,15 +436,79 @@ async function queryBalance() {
       userKeypair.publicKey
     );
 
+    console.log(`  USDC Mint: ${config.usdcMint.toBase58()}`);
+    console.log(`  User Token Account: ${userTokenAccount.toBase58()}`);
+    console.log('');
+
+    // 检查 token account 是否存在，如果不存在则尝试创建
+    let tokenAccountExists = false;
     try {
-      const tokenAccountInfo = await connection.getTokenAccountBalance(userTokenAccount);
-      console.log(`USDC Balance: ${tokenAccountInfo.value.uiAmount} USDC`);
+      const accountInfo = await connection.getAccountInfo(userTokenAccount);
+      if (accountInfo !== null) {
+        tokenAccountExists = true;
+      }
     } catch (e) {
-      console.log('USDC Token Account not found');
+      // Account doesn't exist
+      tokenAccountExists = false;
     }
 
-  } catch (error) {
-    printError(`查询失败: ${error}`);
+    // 如果账户不存在，尝试创建
+    if (!tokenAccountExists) {
+      console.log('⚠️  Token account 不存在，尝试创建...');
+      try {
+        const createATAInstruction = createAssociatedTokenAccountInstruction(
+          userKeypair.publicKey,
+          userTokenAccount,
+          userKeypair.publicKey,
+          config.usdcMint
+        );
+        const createTx = new Transaction().add(createATAInstruction);
+        
+        // 使用 sendAndConfirmTransaction
+        const signature = await sendAndConfirmTransaction(
+          connection,
+          createTx,
+          [userKeypair],
+          { commitment: 'confirmed' }
+        );
+        
+        console.log(`✓ Token account 创建成功: ${signature}`);
+        tokenAccountExists = true;
+      } catch (createError: any) {
+        // 创建失败，但不中断查询，继续显示余额为0
+        console.log(`⚠️  无法创建 token account: ${createError.message || createError}`);
+        console.log(`   这可能是因为 USDC mint 地址无效或网络问题`);
+      }
+    }
+
+    // 查询 USDC 余额
+    try {
+      if (tokenAccountExists) {
+        const tokenAccountInfo = await connection.getTokenAccountBalance(userTokenAccount);
+        const uiAmount = tokenAccountInfo.value.uiAmount;
+        const amount = tokenAccountInfo.value.amount;
+        
+        if (uiAmount !== null && uiAmount > 0) {
+          console.log(`USDC Balance: ${uiAmount} USDC`);
+        } else {
+          console.log(`USDC Balance: 0 USDC`);
+        }
+        console.log(`USDC Balance (最小单位): ${amount}`);
+      } else {
+        // 账户不存在，余额为 0
+        console.log(`USDC Balance: 0 USDC`);
+        console.log(`USDC Balance (最小单位): 0`);
+        console.log(`  (Token account 不存在)`);
+      }
+    } catch (e: any) {
+      console.log(`USDC Balance: 0 USDC`);
+      console.log(`USDC Balance (最小单位): 0`);
+      console.log(`  (查询余额时出错: ${e.message || e})`);
+    }
+
+  } catch (error: any) {
+    printError(`查询失败: ${error.message || error}`);
+    throw error;
   }
 }
 

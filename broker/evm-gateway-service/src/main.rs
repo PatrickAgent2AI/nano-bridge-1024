@@ -18,8 +18,7 @@ use ethers::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::{CorsLayer, Any};
-use axum::http::HeaderName;
+use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
@@ -197,9 +196,8 @@ async fn main() -> Result<()> {
         .allow_origin(allowed_origin.parse::<axum::http::HeaderValue>().unwrap())
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
         .allow_headers([
-            HeaderName::from_static("content-type"),
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("accept"),
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
         ])
         .allow_credentials(true);
     
@@ -278,9 +276,15 @@ async fn stake_to_1024chain(
     receiver_address: &str,
 ) -> Result<String> {
     // 解析金额（支持字符串格式的大数）
-    let amount: U256 = amount_str
-        .parse()
-        .context("Failed to parse amount")?;
+    // 注意：U256::from_dec_str 用于解析十进制字符串，避免被误解析为十六进制
+    let amount: U256 = U256::from_dec_str(amount_str)
+        .context("Failed to parse amount as decimal")?;
+
+    info!(
+        amount_str = %amount_str,
+        amount_parsed = %amount,
+        "Parsed amount from string"
+    );
 
     // 验证 amount 不超过 uint64::MAX，因为事件中会转换为 uint64
     // uint64::MAX = 18,446,744,073,709,551,615
@@ -306,6 +310,12 @@ async fn stake_to_1024chain(
         .call()
         .await
         .context("Failed to check USDC balance")?;
+
+    info!(
+        balance = %balance,
+        required_amount = %amount,
+        "Checking USDC balance"
+    );
 
     if balance < amount {
         error!(
@@ -363,6 +373,13 @@ async fn stake_to_1024chain(
 
     // 3. 调用 stake 函数
     let receiver_addr = receiver_address.to_string();
+    
+    info!(
+        amount_before_call = %amount,
+        receiver = %receiver_addr,
+        "Calling stake method"
+    );
+    
     let method = state
         .bridge_contract
         .method::<_, u64>("stake", (amount, receiver_addr))

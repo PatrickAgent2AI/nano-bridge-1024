@@ -131,6 +131,8 @@ INIT_TX=$(echo "$INIT_OUTPUT" | grep -oP "transactionHash\s+\K(0x[a-fA-F0-9]{64}
 
 echo "初始化交易: ${INIT_TX}"
 
+OLD_EVM_CONTRACT_ADDRESS=$(grep -oP "EVM_CONTRACT_ADDRESS=\K(0x[a-fA-F0-9]{40})" "$ENV_FILE" | head -1)
+
 # 保存到环境变量文件
 if [ -f "$ENV_FILE" ]; then
     if grep -q "EVM_CONTRACT_ADDRESS=" "$ENV_FILE"; then
@@ -141,45 +143,21 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # ==============================================================================
-# 同步配置到 Relayer
+# 全项目同步配置：替换旧合约地址为新地址
 # ==============================================================================
 
 echo ""
-echo -e "${YELLOW}同步配置到 Relayer...${NC}"
+echo -e "${YELLOW}正在全项目替换合约地址...${NC}"
 
-RELAYER_DIR="$PROJECT_ROOT/relayer"
-UPDATED_COUNT=0
+# 确定项目根目录（脚本所在目录的父目录）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT=$(dirname "$(dirname "$SCRIPT_DIR")")
 
-# 更新 e2s-listener 配置（SOURCE_CHAIN）
-if [ -f "$RELAYER_DIR/e2s-listener/.env" ]; then
-    if grep -q "^SOURCE_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/e2s-listener/.env"; then
-        sed -i "s|^SOURCE_CHAIN__CONTRACT_ADDRESS=.*|SOURCE_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/e2s-listener/.env"
-        echo -e "${GREEN}✓ 已更新 e2s-listener/.env${NC}"
-        UPDATED_COUNT=$((UPDATED_COUNT + 1))
-    fi
-fi
+echo $OLD_EVM_CONTRACT_ADDRESS
+echo $CONTRACT_ADDRESS
+echo $PROJECT_ROOT
 
-# 更新 e2s-submitter 配置（SOURCE_CHAIN）
-if [ -f "$RELAYER_DIR/e2s-submitter/.env" ]; then
-    if grep -q "^SOURCE_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/e2s-submitter/.env"; then
-        sed -i "s|^SOURCE_CHAIN__CONTRACT_ADDRESS=.*|SOURCE_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/e2s-submitter/.env"
-        echo -e "${GREEN}✓ 已更新 e2s-submitter/.env${NC}"
-        UPDATED_COUNT=$((UPDATED_COUNT + 1))
-    fi
-fi
-
-# 更新 s2e 配置（TARGET_CHAIN）
-if [ -f "$RELAYER_DIR/s2e/.env" ]; then
-    if grep -q "^TARGET_CHAIN__CONTRACT_ADDRESS=" "$RELAYER_DIR/s2e/.env"; then
-        sed -i "s|^TARGET_CHAIN__CONTRACT_ADDRESS=.*|TARGET_CHAIN__CONTRACT_ADDRESS=${CONTRACT_ADDRESS}|g" "$RELAYER_DIR/s2e/.env"
-        echo -e "${GREEN}✓ 已更新 s2e/.env${NC}"
-        UPDATED_COUNT=$((UPDATED_COUNT + 1))
-    fi
-fi
-
-if [ $UPDATED_COUNT -eq 0 ]; then
-    echo -e "${YELLOW}⚠ 未找到 Relayer 配置文件，跳过同步${NC}"
-else
-    echo -e "${GREEN}✓ 已同步 $UPDATED_COUNT 个 Relayer 配置文件${NC}"
-fi
-
+find "$PROJECT_ROOT" \
+    -type f ! -path "*/.git/*" ! -path "*/node_modules/*" ! -path "*/cache/*" ! -path "*/.venv/*" ! \
+    -path "*/out/*" ! -path "*/target/*" ! -path "*/.next/*" ! -name "*.log" \
+    -exec sed -i "s|$OLD_EVM_CONTRACT_ADDRESS|$CONTRACT_ADDRESS|g" {} +

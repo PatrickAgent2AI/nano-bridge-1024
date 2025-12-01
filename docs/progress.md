@@ -544,7 +544,7 @@
 
 #### Gateway 模块开发
 ✅ **EVM Gateway Service 实现**
-  - ✅ 创建 `gateway/evm-gateway-service` 服务目录（与 `relayer` 独立，非层级关系）
+  - ✅ 创建 `broker/evm-gateway-service` 服务目录（与 `relayer` 独立，非层级关系）
   - ✅ 实现 HTTP API 服务（接收 USDC 金额、目标地址参数）
   - ✅ 使用中转钱包调用 EVM stake 合约接口
   - ✅ 自动检查 USDC 余额
