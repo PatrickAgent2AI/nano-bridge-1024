@@ -601,6 +601,75 @@ struct ReceiverState {
 
 ---
 
+## 两段式跨链桥设计
+
+### 概述
+
+系统采用**两段式跨链桥**架构，通过成熟的跨链桥（LiFi SDK）和自定义 Broker 服务，实现任意链与 1024chain 之间的跨链转账。该设计充分利用现有跨链基础设施，降低开发复杂度，同时提供灵活的跨链能力。
+
+### 架构设计
+
+#### 整体流程
+
+**Deposit 方向（存入）：任意链 → Arbitrum → 1024chain**
+
+```
+用户钱包（源链代币）
+  ↓ [第一步：LiFi SDK 跨链]
+Broker 中转钱包（Arbitrum USDC）
+  ↓ [第二步：Broker EVM Gateway Service]
+EVM Stake 合约（Arbitrum）
+  ↓ [Relayer 多签验证]
+1024chain 用户地址（USDC）
+```
+
+**Withdraw 方向（提取）：1024chain → Arbitrum → 任意链**
+
+```
+1024chain 用户地址（USDC）
+  ↓ [第一步：SVM Stake 合约]
+Broker 中转钱包（Arbitrum USDC）
+  ↓ [第二步：Broker Withdraw Gateway Service + LiFi SDK]
+用户钱包（目标链目标代币）
+```
+
+#### 设计优势
+
+1. **利用成熟基础设施**：使用 LiFi SDK 处理复杂的跨链路由和流动性聚合
+2. **降低开发成本**：无需自行实现多链跨链桥，专注于核心业务逻辑
+3. **灵活扩展**：支持任意链和任意代币的跨链
+4. **统一接口**：通过 Broker 服务提供统一的 HTTP API
+5. **安全性**：Broker 服务使用中转钱包，私钥安全管理
+
+#### 支持的链和代币
+
+**Deposit 方向支持的源链：**
+- Ethereum Mainnet
+- Polygon
+- BSC (Binance Smart Chain)
+- Avalanche
+- Base
+- Optimism
+- Arbitrum
+
+**Withdraw 方向支持的目标链：**
+- 所有 LiFi SDK 支持的链（包括上述所有链）
+
+**代币支持：**
+- Deposit：源链上的任意代币（通过 LiFi SDK 自动兑换为 Arbitrum USDC）
+- Withdraw：目标链上的任意代币（通过 LiFi SDK 从 Arbitrum USDC 兑换）
+
+### Broker 服务架构
+
+Broker 服务由两个独立的网关服务组成：
+
+1. **EVM Gateway Service**：处理 Deposit 方向的第二步（Arbitrum → 1024chain）
+2. **Withdraw Gateway Service**：处理 Withdraw 方向的第二步（Arbitrum → 任意链）
+
+两个服务完全独立，可以分别部署和扩展。
+
+---
+
 ## Gateway 服务设计
 
 ### 概述
@@ -668,12 +737,55 @@ Gateway 服务是一个独立的 HTTP 服务，用于完成跨链桥的第二步
 3. **余额检查**：每次请求前检查余额，防止余额不足的交易
 4. **授权管理**：使用最大授权金额，减少 approve 操作频率
 
-#### 未来扩展
+#### Withdraw Gateway Service 设计
 
-- **1024chain → 任意链**：待实现
-  - 监听 1024chain 事件
-  - 调用 SVM stake 接口
-  - 完成从 1024chain 到任意链的跨链
+**功能模块：**
+
+1. **HTTP API 服务器**
+   - 使用 Express 框架（TypeScript/Node.js）
+   - 接收 POST `/withdraw` 请求
+   - 请求参数：`target_chain`（目标链 ID）、`target_asset`（目标代币地址）、`usdc_amount`（USDC 金额）、`recipient_address`（接收地址）
+   - 返回：`success`、`message`、`route_id`、`tx_hash`
+
+2. **LiFi SDK 集成**
+   - 使用 `@lifi/sdk` 获取跨链报价
+   - 使用 `executeRoute` 执行跨链交易
+   - 支持从 Arbitrum USDC 到任意链任意代币的跨链
+
+3. **速率限制和并发控制**
+   - 使用 `rate-limiter-flexible` 实现速率限制
+   - 使用 `p-queue` 控制并发请求数量
+   - 支持 LiFi API 密钥以提高速率限制
+
+4. **CORS 配置**
+   - 开发环境允许所有源
+   - 生产环境支持配置允许的源列表
+   - 支持通过环境变量配置
+
+**技术栈：**
+- **运行时**：Node.js 18+
+- **语言**：TypeScript
+- **HTTP 框架**：Express
+- **跨链 SDK**：@lifi/sdk
+- **EVM Provider**：Viem（LiFi SDK 内置支持）
+- **配置管理**：dotenv
+
+**配置参数：**
+- `LIFI_API_KEY`：LiFi API 密钥（可选，用于提高速率限制）
+- `ARBITRUM_RPC_URL`：Arbitrum RPC 地址
+- `ARBITRUM_CHAIN_ID`：链 ID（421614 = Sepolia, 42161 = Mainnet）
+- `ARBITRUM_USDC_ADDRESS`：Arbitrum 上的 USDC 合约地址
+- `TRANSIT_WALLET_PRIVATE_KEY`：中转钱包私钥（hex 格式）
+- `DEFAULT_SLIPPAGE`：默认滑点（默认 0.03 = 3%）
+- `PORT`：HTTP 服务端口（默认 8085）
+- `NODE_ENV`：环境（development 或 production）
+- `CORS_ALLOWED_ORIGINS`：允许的 CORS 源（逗号分隔，可选）
+
+**安全考虑：**
+1. **私钥管理**：私钥通过环境变量配置，不应硬编码
+2. **速率限制**：实现合理的速率限制，避免超过 LiFi API 限制
+3. **并发控制**：使用队列控制并发请求，避免资源竞争
+4. **CORS 配置**：生产环境限制允许的源，防止未授权访问
 
 ---
 

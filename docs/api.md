@@ -36,7 +36,8 @@
 
 | 模块 | 类别 | 功能名称 | 权限 | 主要参数 | 输出 | 功能效果 |
 |------|------|----------|------|----------|------|----------|
-| Gateway服务 | HTTP API | `POST /stake` | 公开 | `amount`, `target_address` | `success`, `message`, `tx_hash` | 接收跨链请求，调用 EVM stake 接口完成从 Arbitrum 到 1024chain 的跨链 |
+| EVM Gateway服务 | HTTP API | `POST /stake` | 公开 | `amount`, `target_address` | `success`, `message`, `tx_hash` | 接收跨链请求，调用 EVM stake 接口完成从 Arbitrum 到 1024chain 的跨链（Deposit 方向第二步） |
+| Withdraw Gateway服务 | HTTP API | `POST /withdraw` | 公开 | `target_chain`, `target_asset`, `usdc_amount`, `recipient_address` | `success`, `message`, `route_id`, `tx_hash` | 接收提现请求，使用 LiFi SDK 完成从 Arbitrum 到任意链的跨链（Withdraw 方向第二步） |
 
 ### Relayer 服务 API 总览表
 
@@ -624,6 +625,119 @@ GATEWAY_URL=http://localhost:8084 ./gateway-cli.sh stake 1000000 "address"
 1. 用户使用成熟的跨链桥（如 LiFi）将资产从任意链跨链到 Arbitrum
 2. USDC 转入中转钱包地址
 3. Gateway 服务接收 HTTP 请求
+4. 服务使用中转钱包调用 EVM stake 合约接口
+5. 完成从 Arbitrum 到 1024chain 的第二步跨链
+
+---
+
+### Withdraw Gateway Service API
+
+Withdraw Gateway Service 提供 HTTP API，用于完成从 Arbitrum 到任意链的跨链转账（Withdraw 方向的第二步）。
+
+#### API 总览表
+
+| 端点 | 方法 | 功能 | 请求参数 | 响应 | 说明 |
+|------|------|------|----------|------|------|
+| `/withdraw` | POST | 使用 LiFi SDK 执行跨链交易 | `target_chain`, `target_asset`, `usdc_amount`, `recipient_address` | `success`, `message`, `route_id`, `tx_hash` | 完成从 Arbitrum 到任意链的跨链 |
+
+#### POST /withdraw
+
+接收提现请求，使用 LiFi SDK 发起跨链交易，将 Arbitrum 上的 USDC 跨链到目标链的目标资产。
+
+**请求体：**
+```json
+{
+  "target_chain": 1,
+  "target_asset": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+  "usdc_amount": "1000000",
+  "recipient_address": "0xRecipientAddress"
+}
+```
+
+**参数说明：**
+- `target_chain`：目标链的链 ID（整数，例如：1 = Ethereum Mainnet, 137 = Polygon, 56 = BSC）
+- `target_asset`：目标链上资产的合约地址（字符串，hex 格式，必须以 0x 开头）
+- `usdc_amount`：要提现的 USDC 数量（字符串格式，最小单位，例如 "1000000" = 1 USDC，假设 6 位小数）
+- `recipient_address`：接收资产的目标地址（字符串，hex 格式，必须以 0x 开头）
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "message": "Withdrawal initiated",
+  "route_id": "route_id_from_lifi",
+  "tx_hash": "0x..."
+}
+```
+
+**错误响应：**
+```json
+{
+  "success": false,
+  "message": "错误信息",
+  "route_id": null,
+  "tx_hash": null
+}
+```
+
+**功能流程：**
+1. 验证请求参数（类型、格式、有效性）
+2. 检查速率限制（使用 rate-limiter-flexible）
+3. 加入请求队列（使用 p-queue 控制并发）
+4. 使用 LiFi SDK 获取跨链报价（`getQuote`）
+5. 使用 LiFi SDK 执行跨链路由（`executeRoute`）
+6. 跟踪路由执行状态（通过 `updateCallback`）
+7. 返回路由 ID 和交易哈希
+
+**支持的链和代币：**
+- 支持所有 LiFi SDK 支持的链（Ethereum、Polygon、BSC、Avalanche、Base、Optimism、Arbitrum 等）
+- 支持目标链上的任意代币（通过 LiFi SDK 自动路由和兑换）
+
+**示例请求：**
+```bash
+curl -X POST http://localhost:8085/withdraw \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_chain": 1,
+    "target_asset": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    "usdc_amount": "1000000",
+    "recipient_address": "0xRecipientAddress"
+  }'
+```
+
+**配置参数：**
+
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|--------|----------|--------|------|
+| LiFi API 密钥 | `LIFI_API_KEY` | 无 | LiFi API 密钥（可选，用于提高速率限制） |
+| Arbitrum RPC | `ARBITRUM_RPC_URL` | 无 | Arbitrum RPC 地址 |
+| Arbitrum Chain ID | `ARBITRUM_CHAIN_ID` | 42161 | Arbitrum 链 ID（421614 = Sepolia, 42161 = Mainnet） |
+| Arbitrum USDC 地址 | `ARBITRUM_USDC_ADDRESS` | 无 | Arbitrum 上的 USDC 合约地址 |
+| 中转钱包私钥 | `TRANSIT_WALLET_PRIVATE_KEY` | 无 | 中转钱包私钥（hex 格式，带或不带 0x 前缀） |
+| 默认滑点 | `DEFAULT_SLIPPAGE` | 0.03 | 默认滑点（0.03 = 3%） |
+| 服务端口 | `PORT` | 8085 | HTTP 服务监听端口 |
+| 环境 | `NODE_ENV` | development | 环境（development 或 production） |
+| CORS 允许的源 | `CORS_ALLOWED_ORIGINS` | 无 | 允许的 CORS 源（逗号分隔，可选） |
+
+**速率限制：**
+- 未使用 API 密钥：每两小时最多 200 个请求
+- 使用 API 密钥：每分钟最多 200 个请求
+- 服务内部实现速率限制和并发控制
+
+**架构说明：**
+
+**与 EVM Gateway Service 的区别：**
+- **EVM Gateway Service**：处理 Deposit 方向的第二步（Arbitrum → 1024chain），调用 EVM stake 合约
+- **Withdraw Gateway Service**：处理 Withdraw 方向的第二步（Arbitrum → 任意链），使用 LiFi SDK 执行跨链
+
+**工作流程：**
+1. 用户在 1024chain 调用 SVM stake 合约，将 USDC 发送到 Broker 的 Arbitrum 地址
+2. USDC 从 1024chain 跨链到 Arbitrum，转入 Broker 的中转钱包
+3. Withdraw Gateway Service 接收 HTTP 请求
+4. 服务使用 LiFi SDK 获取跨链报价并执行跨链交易
+5. 完成从 Arbitrum 到目标链的跨链
+
+---
 4. 服务使用中转钱包调用 EVM stake 合约接口
 5. 完成从 Arbitrum 到 1024chain 的第二步跨链
 

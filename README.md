@@ -203,24 +203,78 @@ docker ps | grep relayer-container-relayer2
   - **高性能架构**：Tokio 异步运行时 + 文件队列（e2s）/ 内存队列（s2e）
   - 详细设计见 [relayer/README.md](relayer/README.md)
 
-### 跨链网关服务
+### 跨链网关服务（Broker）
 
-- **broker/**：跨链网关服务（Rust 实现 🦀）
-  - **evm-gateway-service**：EVM 网关服务 ✅ **已实现**
-    - **任意链 → Arbitrum → 1024chain**：✅ **已实现**
-      - HTTP API 接收跨链请求（参数：USDC 金额、目标地址）
-      - 使用中转钱包调用 EVM stake 合约接口
-      - 自动检查 USDC 余额
-      - 自动处理 USDC 授权（approve）
-      - 完成从 Arbitrum 到 1024chain 的第二步跨链
-      - HTTP API（端口 8084，可配置）
-      - 详细说明：[broker/README.md](broker/README.md)
-  - **1024chain → 任意链**：⏳ **待实现**
-    - 文档代码暂时留空，待完成当前模块后详述
-  - **架构说明**：与 `relayer` 不是层级关系，而是独立的服务模块
-    - `relayer`：负责监听链上事件、签名验证、多签提交（双向跨链）
-    - `evm-gateway`：负责接收外部 HTTP 请求，使用中转钱包调用 EVM stake 接口（单向：Arbitrum → 1024chain）
-    - **工作流程**：用户使用成熟跨链桥（如 LiFi）从任意链跨链到 Arbitrum，USDC 转入中转钱包 → 本服务接收 HTTP 请求 → 调用 EVM stake 接口完成第二步跨链到 1024chain
+- **broker/**：跨链网关服务，实现两段式跨链桥方案 ✅ **已完整实现**
+  
+  #### 两段式跨链桥架构
+  
+  系统采用**两段式跨链桥**设计，通过成熟的跨链桥（LiFi SDK）和自定义 Broker 服务，实现任意链与 1024chain 之间的跨链转账：
+  
+  **Deposit 方向（存入）：任意链 → Arbitrum → 1024chain** ✅
+  1. **第一步**：用户使用 LiFi SDK 将资产从任意链跨链到 Arbitrum 的 USDC
+     - 支持的源链：Ethereum、Polygon、BSC、Avalanche、Base、Optimism、Arbitrum 等
+     - 支持的源代币：各链上的原生代币或稳定币
+     - 目标：Arbitrum 上的 USDC
+     - USDC 转入 Broker 的中转钱包地址
+  2. **第二步**：调用 Broker EVM Gateway Service 完成从 Arbitrum 到 1024chain 的跨链
+     - HTTP API：`POST /stake`（端口 8084）
+     - 参数：`amount`（USDC 金额）、`target_address`（1024chain 接收地址）
+     - 服务使用中转钱包自动调用 EVM stake 合约接口
+     - 自动检查 USDC 余额和授权
+  
+  **Withdraw 方向（提取）：1024chain → Arbitrum → 任意链** ✅
+  1. **第一步**：用户在 1024chain 调用 SVM stake 合约，将 USDC 发送到 Broker 的 Arbitrum 地址
+     - 用户调用 SVM 合约的 `stake` 方法
+     - 参数：`amount`（USDC 金额）、`receiver_address`（Broker 的 Arbitrum 地址）
+     - USDC 从 1024chain 跨链到 Arbitrum，转入 Broker 的中转钱包
+  2. **第二步**：调用 Broker Withdraw Gateway Service 完成从 Arbitrum 到目标链的跨链
+     - HTTP API：`POST /withdraw`（端口 8085）
+     - 参数：`target_chain`（目标链 ID）、`target_asset`（目标代币地址）、`usdc_amount`（USDC 金额）、`recipient_address`（接收地址）
+     - 服务使用 LiFi SDK 自动执行跨链交易
+     - 支持跨链到任意链的任意代币
+  
+  #### Broker 服务组件
+  
+  - **evm-gateway-service**：EVM 网关服务（Rust 实现）✅
+    - 负责 Deposit 方向的第二步：Arbitrum → 1024chain
+    - HTTP API（端口 8084）
+    - 详细说明：[broker/evm-gateway-service/README.md](broker/evm-gateway-service/README.md)
+  
+  - **withdraw-gateway-service**：提现网关服务（TypeScript/Node.js 实现）✅
+    - 负责 Withdraw 方向的第二步：Arbitrum → 任意链
+    - HTTP API（端口 8085）
+    - 集成 LiFi SDK 实现跨链
+    - 支持速率限制和并发控制
+    - 详细说明：[broker/withdraw-gateway-service/README.md](broker/withdraw-gateway-service/README.md)
+  
+  #### 架构说明
+  
+  Broker 服务与 `relayer` 完全独立，职责不同：
+  - **relayer**：负责监听链上事件、签名验证、多签提交（双向跨链：EVM ↔ SVM）
+  - **broker**：负责接收外部 HTTP 请求，完成两段式跨链桥的第二步（单向：Arbitrum → 1024chain 或 1024chain → 任意链）
+  
+  #### 工作流程示例
+  
+  **Deposit 流程：**
+  ```
+  用户钱包（Ethereum USDC）
+    ↓ [LiFi SDK 跨链]
+  Broker 中转钱包（Arbitrum USDC）
+    ↓ [Broker EVM Gateway Service]
+  EVM Stake 合约（Arbitrum）
+    ↓ [Relayer 多签验证]
+  1024chain 用户地址（USDC）
+  ```
+  
+  **Withdraw 流程：**
+  ```
+  1024chain 用户地址（USDC）
+    ↓ [SVM Stake 合约]
+  Broker 中转钱包（Arbitrum USDC）
+    ↓ [Broker Withdraw Gateway Service + LiFi SDK]
+  用户钱包（目标链目标代币）
+  ```
 
 ### 部署和运维脚本
 
